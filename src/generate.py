@@ -337,6 +337,8 @@ class ParallelSPGenerator(nn.Module):
         slot["draft_iteration"] = 0
         slot["total_new_tokens"] = 0
         
+        #slot["budget"] = slot["input_ids"].shape[1] + self.max_new_tokens  # ★
+        
     def forward(self):
         for s in self.slots:
             self._fill_slot(s)
@@ -361,10 +363,9 @@ class ParallelSPGenerator(nn.Module):
                 break              
             
             prefix_len_list = []
-            for slot in active_slots:
-                prefix_len_list.append(slot["input_ids"].shape[1])
                 
             for slot in active_slots:
+                prefix_len_list.append(slot["input_ids"].shape[1])
                 slot["draft_iteration"] += 1
                 draft_t = torch.tensor([draft_ids], device=slot["input_ids"].device)
                 slot["input_ids"] = torch.cat([slot["input_ids"], draft_t], dim=-1)

@@ -10,7 +10,7 @@ from transformers import AutoTokenizer, LlamaForCausalLM
 from src.args import get_args
 from src.dataset import load_dataset
 from src.model import load_model_with_fractal, set_verify_mode, load_quantized_model
-from FractalLLM.src.generate import ParallelSPGenerator
+from src.generate import ParallelSPGenerator
 from src.utils import FlopsCounter
 
 
@@ -187,7 +187,7 @@ def main():
                     total_checks += num_drafted
                     
                     ### DEBUG
-                    print("total_checks: ", total_checks)
+                    print("total_generated_tokens:", total_generated_tokens)
 
                     if num_drafted > 0:
                         t_verify_start = time.time()

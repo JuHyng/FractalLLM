@@ -1,4 +1,4 @@
-wandb offline
+wandb online
 
 for dataset in xsum gsm8k 
 do
