@@ -1,4 +1,4 @@
-name: unsloth_env
+name: fractal_env
 channels:
   - xformers
   - pytorch
@@ -189,4 +189,4 @@ dependencies:
     - yacs==0.1.8
     - yarl==1.18.3
     - zstandard==0.23.0
-prefix: /home/nlplab/anaconda3/envs/unsloth_env
+prefix: /home/nlplab/anaconda3/envs/fractal_env
