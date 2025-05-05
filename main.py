@@ -10,7 +10,7 @@ from transformers import AutoTokenizer, LlamaForCausalLM
 from src.args import get_args
 from src.dataset import load_dataset
 from src.model import load_model_with_fractal, set_verify_mode, load_quantized_model
-from src.generate import ParallelSPGenerator
+from FractalLLM.src.generate import ParallelSPGenerator
 from src.utils import FlopsCounter
 
 
@@ -171,6 +171,8 @@ def main():
                     # draft
                     t_draft_start = time.time()
                     for i in range(args.draft_len):
+                        if total_generated_tokens + i > max_length:
+                            break
                         draft_logits = draft_model(draft_seq, use_cache=args.use_cache).logits[:, -1, :]
                         next_id = torch.argmax(draft_logits, dim=-1, keepdim=True)
                         draft_seq = torch.cat([draft_seq, next_id], dim=-1)

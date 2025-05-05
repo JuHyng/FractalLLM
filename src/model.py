@@ -566,7 +566,7 @@ class FractalModule(torch.nn.Module):
                 input_ids[batch_idx, i] = token_pred
                 
             # print("[FractalModule]input_ids", input_ids[batch_idx, :])
-            print(f"[FractalModule]decoded tokens of layer_idx {layer_idx}: \n", self.tokenizer.decode(input_ids[batch_idx, -draft_len:]))
+            # print(f"[FractalModule]decoded tokens of layer_idx {layer_idx}: \n", self.tokenizer.decode(input_ids[batch_idx, -draft_len:]))
         
         fractal_emb = self.fractal_embedding(input_ids)
         hidden_states = fractal_emb
