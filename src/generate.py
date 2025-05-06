@@ -240,12 +240,12 @@ def verify_forward(
     
     for i, slot_data in enumerate(slots):        
         verified_count = 0
-        total_checked = (args.draft_len*2) - 1
+        total_checked = (args.draft_len*2)
         fail_draft = False
         first_fail_label = None
 
-        for pos in range((args.draft_len*2) - 1):
-            pos = pos + slot_data["current_input_ids"].shape[1] - (args.draft_len*2) + 1
+        for pos in range((args.draft_len*2)):
+            pos = pos + slot_data["current_input_ids"].shape[1] - (args.draft_len*2) - 1
             token_logits = logits[i, pos, :]
             verify_pred_id = torch.argmax(token_logits).item()
             curr_id = slot_data["current_input_ids"][0, pos+1].item()
