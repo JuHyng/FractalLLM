@@ -184,13 +184,10 @@ class FractalLlamaModel(LlamaPreTrainedModel):
                         cache_position=cache_position,
                         position_embeddings=position_embeddings,
                         prefix_len_list=prefix_len_list,
-                        fidx=fidx,
                         **flash_attn_kwargs,
                     )
                     
                     input_ids = layer_outputs[-1]
-                    position_ids = layer_outputs[-2]
-                    position_embeddings = layer_outputs[-3]
                     fidx += 1
                     
                 else:
@@ -584,8 +581,7 @@ class FractalModule(torch.nn.Module):
                  decoder_layers: torch.nn.ModuleList,
                  norm_layer: LlamaRMSNorm = None,
                  tokenizer=None,
-                 draft_layer_indexes=None,
-                 rotary_emb=None,
+                 draft_layer_indexes=None
     ):
         super().__init__()
     
@@ -595,7 +591,6 @@ class FractalModule(torch.nn.Module):
         self.fractal_embedding = copy.deepcopy(embedding_layer)
         self.fractal_embedding_device = next(self.fractal_embedding.parameters()).device
         self.fractal_norm = copy.deepcopy(norm_layer)
-        self.rotary_emb = rotary_emb
         
         self.decoder_layers = decoder_layers
         self.draft_layer_indexes = draft_layer_indexes
@@ -669,26 +664,13 @@ class FractalModule(torch.nn.Module):
                 # token_prob = torch.softmax(token_logits, dim=-1)
                 token_prob = token_logits
                 token_pred = torch.argmax(token_prob).item()
-                if i >= input_ids.shape[1]:
-                    token_tensor = torch.full(
-                    (input_ids.shape[0], 1),
-                    token_pred,
-                    device=input_ids.device,
-                    dtype=input_ids.dtype # input_ids와 동일한 데이터 타입 사용
-                    )
-                    input_ids = torch.cat([input_ids, token_tensor], dim=1)
-                else:
-                    input_ids[batch_idx, i] = token_pred
+                input_ids[batch_idx, i] = token_pred
                 
             # print("[FractalModule]input_ids", input_ids[batch_idx, :])
             # print(f"[FractalModule]decoded tokens of layer_idx {layer_idx}: \n", self.tokenizer.decode(input_ids[batch_idx, -draft_len:]))
         
-        new_seq_len = input_ids.shape[1]
         fractal_emb = self.fractal_embedding(input_ids)
         hidden_states = fractal_emb
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        position_ids = torch.arange(
-            new_seq_len, device=input_ids.device).unsqueeze(0)
         
         for i in range(layer_idx):
             layer_out = self.decoder_layers[i].forward(
@@ -707,7 +689,7 @@ class FractalModule(torch.nn.Module):
             else:
                 hidden_states = layer_out[0]
 
-        return hidden_states, position_embeddings, position_ids, input_ids
+        return hidden_states, input_ids
     
     
     def _update_causal_mask(
@@ -869,8 +851,7 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         prefix_len_list: Optional[List[int]] = None,
-        fidx: Optional[int] = None,
-        skip_original: Optional[bool] = False,
+        skip_original: bool = False,
         **kwargs,
     ):
         
@@ -889,7 +870,7 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
             use_cache=use_cache,
             output_attentions=output_attentions,
             cache_position=cache_position if cache_position is not None else None,
-            draft_len=self.draft_len + fidx+1,
+            draft_len=self.draft_len,
             prefix_len_list=prefix_len_list,
             **kwargs,
             )
@@ -897,7 +878,7 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
             if skip_original: # cache 구현용, 의미없음
                 return None
             
-            fractal_hidden_states, position_embeddings, position_ids, input_ids = fractal_out
+            fractal_hidden_states, input_ids = fractal_out
             
             if hidden_states.device != fractal_hidden_states.device:
                 fractal_hidden_states = fractal_hidden_states.to(hidden_states.device)
@@ -909,9 +890,9 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
                 original_part = hidden_states[batch_idx, :, :]  
                 prefix_part   = original_part[:prefix_len, :]     
 
-                fractal_part = fractal_hidden_states[batch_idx, prefix_len : prefix_len + (self.draft_len + fidx+1), :]
+                fractal_part = fractal_hidden_states[batch_idx, prefix_len : prefix_len + self.draft_len, :]
                 
-                rest_part = original_part[prefix_len + (self.draft_len + fidx+1) :, :]
+                rest_part = original_part[prefix_len + self.draft_len :, :]
                 combined_part = torch.cat((prefix_part, fractal_part, rest_part), dim=0)
                 combined_part = combined_part.unsqueeze(0)  # shape=(1, new_seq_len, hidden_dim)
 
@@ -940,7 +921,7 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
             normal_out = results[0]
             self_attn_weights = None
 
-        return (normal_out, self_attn_weights, position_embeddings, position_ids, input_ids)  if output_attentions else (normal_out, position_embeddings, position_ids, input_ids)
+        return (normal_out, self_attn_weights, input_ids)  if output_attentions else (normal_out, input_ids)
     
 
 def load_quantized_model(
@@ -999,7 +980,6 @@ def load_model_with_fractal(
     embedding_layer = base_model.get_input_embeddings()
     lm_head = base_model.get_output_embeddings()
     norm_layer = base_model.model.norm
-    rotary_emb = base_model.model.rotary_emb
     
     quant_model = load_quantized_model(
         model_name=model_name,
@@ -1019,7 +999,6 @@ def load_model_with_fractal(
         decoder_layers=decomposed_layers,
         norm_layer=norm_layer,
         tokenizer=tokenizer,
-        rotary_emb=rotary_emb,
     )
     fractal_layer_indexes = experiment_config.draft_layer_indexes
     if len(fractal_layer_indexes) == 0:

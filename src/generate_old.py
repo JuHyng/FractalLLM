@@ -151,21 +151,14 @@ def draft_forward(
     for batch_idx in range(len(prefix_len_list)):
         prefix_len = prefix_len_list[batch_idx]
         
-        # DEBUG
-        print("[Draft] prefix_len:", prefix_len)
-        
         if args.use_cache:
             if slots[batch_idx]["total_new_tokens"] > 0:
                 prefix_len = 1
             cache_batch_split[batch_idx].crop(-(args.draft_len+1))
             past_key_values = DynamicCache.from_batch_splits(cache_batch_split)
         
-        slots[batch_idx]["input_ids"] = slots[batch_idx]["input_ids"] [:, :prefix_len]
-        
-        # DEBUG
-        print("[Draft] slots[batch_idx][input_ids].shape:", slots[batch_idx]["input_ids"].shape)
-        
-        for i in range(prefix_len, prefix_len + (args.draft_len*2)+1):
+        slots[batch_idx]["input_ids"] = slots[batch_idx]["input_ids"] [:, :-args.draft_len]
+        for i in range(prefix_len, prefix_len + args.draft_len+1):
             token_logits = logits[batch_idx, i-1, :]
             token_prob = token_logits
             token_pred = torch.argmax(token_prob).item()
@@ -240,12 +233,12 @@ def verify_forward(
     
     for i, slot_data in enumerate(slots):        
         verified_count = 0
-        total_checked = (args.draft_len*2) - 1
+        total_checked = args.draft_len + 1
         fail_draft = False
         first_fail_label = None
 
-        for pos in range((args.draft_len*2) - 1):
-            pos = pos + slot_data["current_input_ids"].shape[1] - (args.draft_len*2) + 1
+        for pos in range(args.draft_len+1):
+            pos = pos + slot_data["current_input_ids"].shape[1] - (args.draft_len+2)
             token_logits = logits[i, pos, :]
             verify_pred_id = torch.argmax(token_logits).item()
             curr_id = slot_data["current_input_ids"][0, pos+1].item()
@@ -271,7 +264,7 @@ def verify_forward(
         performance_dict["accept_ratio"] = accept_ratio
 
         if fail_draft and first_fail_label is not None:
-            pre_ids = slot_data["input_ids"][:, :-((args.draft_len*2)+1 - verified_count)]
+            pre_ids = slot_data["input_ids"][:, :-(args.draft_len+1 - verified_count)]
             label_tensor = torch.tensor([[first_fail_label]], 
                                 device=pre_ids.device, dtype=pre_ids.dtype)
             slot_data["input_ids"] = torch.cat([pre_ids, label_tensor], dim=-1)

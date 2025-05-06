@@ -9,8 +9,8 @@ from transformers import AutoTokenizer, LlamaForCausalLM
 
 from src.args import get_args
 from src.dataset import load_dataset
-from src.model import load_model_with_fractal, set_verify_mode, load_quantized_model
-from src.generate import ParallelSPGenerator
+from src.model_old import load_model_with_fractal, set_verify_mode, load_quantized_model
+from src.generate_old import ParallelSPGenerator
 from src.utils import FlopsCounter
 
 
@@ -171,7 +171,7 @@ def main():
                     # draft
                     t_draft_start = time.time()
                     for i in range(args.draft_len):
-                        if total_generated_tokens + i > max_length:
+                        if total_generated_tokens + i >= max_length:
                             break
                         draft_logits = draft_model(draft_seq, use_cache=args.use_cache).logits[:, -1, :]
                         next_id = torch.argmax(draft_logits, dim=-1, keepdim=True)
@@ -202,7 +202,7 @@ def main():
                         for i in range(num_drafted):
                             draft_token_at_i = draft_seq[:, old_len + i]
                             target_pred_at_i = verify_next_ids[:, i]
-
+                            
                             if torch.equal(draft_token_at_i, target_pred_at_i):
                                 accept_count += 1
                                 accepted_len += 1
@@ -225,6 +225,10 @@ def main():
                             corrected_token = verify_next_ids[:, accepted_len : accepted_len + 1]
                             generated = torch.cat([generated, corrected_token], dim=-1)
                             total_generated_tokens += 1
+                        
+                        # DEBUG
+                        # print("total_generated_tokens:", total_generated_tokens)
+                        # print("new_tokens:", generated.size(1) - prompt_len)
 
                     # Check if generation finished after this draft/verify cycle
                     if total_generated_tokens >= max_length:
