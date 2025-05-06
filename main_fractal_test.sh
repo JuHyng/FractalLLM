@@ -1,6 +1,6 @@
 wandb offline
 
-for dataset in cnn_dm
+for dataset in gsm8k
 do
 python main.py \
     --model_name meta-llama/Llama-2-7b-hf \

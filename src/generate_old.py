@@ -181,6 +181,7 @@ def verify_forward(
     performance_dict: dict,
     past_key_values:Optional[Cache]=None,
     max_length:Optional[int]=None,
+    first_wrong_flag:Optional[bool]=True,
 ):
     draft_mode_func(model, is_verify=True)
     
@@ -248,10 +249,16 @@ def verify_forward(
                 curr_str = tokenizer.decode(curr_id)
 
             if verify_pred_id == curr_id:
+                if first_wrong_flag:
+                    first_wrong_flag = False
+                
                 if args.print_draft:
                     print(f"[Verify] MATCH: slot {i} at position {pos}: {pred_str} (current: {curr_str})")
                 verified_count += 1
             else:
+                if first_wrong_flag:
+                    input("[Verify] FIRST MISMATCH: slot {i} at position {pos}: {pred_str} (current: {curr_str})")
+                
                 if args.print_draft:
                     print(f"[Verify] MISMATCH: slot {i} position {pos}: {pred_str} (current: {curr_str})")
                 
@@ -354,6 +361,8 @@ class ParallelSPGenerator(nn.Module):
             
         draft_ids = self.tokenizer.convert_tokens_to_ids(self.draft_tokens)
         
+        # DEBUG
+        first_wrong_flag = True
         
         while not done:
             active_slots = [s for s in self.slots if s["active"]]
@@ -439,7 +448,8 @@ class ParallelSPGenerator(nn.Module):
                 args=self.args,
                 performance_dict=self.performance_dict,
                 max_length=self.max_length,
-                past_key_values=past_key_values
+                past_key_values=past_key_values,
+                first_wrong_flag=first_wrong_flag,
             )
             
             if self.args.use_cache:
