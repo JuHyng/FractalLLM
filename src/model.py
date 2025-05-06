@@ -686,9 +686,10 @@ class FractalModule(torch.nn.Module):
         new_seq_len = input_ids.shape[1]
         fractal_emb = self.fractal_embedding(input_ids)
         hidden_states = fractal_emb
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
         position_ids = torch.arange(
             new_seq_len, device=input_ids.device).unsqueeze(0)
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
         
         for i in range(layer_idx):
             layer_out = self.decoder_layers[i].forward(
