@@ -1,21 +1,18 @@
 wandb offline
 
-
 for dataset in gsm8k
 do
-python main2.py \
+python main.py \
     --model_name meta-llama/Llama-3.2-1B \
-    --draft_token "[DRAFT{i}]" \
-    --decode_method fractal \
+    --decode_method draft \
     --decomp_method quant_8bit \
-    --draft_len 3 \
-    --draft_layer_indexes 13 14 15\
+    --draft_len 8 \
     --split train \
     --output_dir ./ \
     --dataset $dataset \
     --max_samples 100 \
     --num_beams 1 \
     --n_fewshot 0 \
-    --use_cache False \
-    --print_draft True
+    --device_map "cuda:0" \
+    --use_cache False
 done

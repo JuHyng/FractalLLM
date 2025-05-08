@@ -147,18 +147,9 @@ def draft_forward(
     
     if args.use_cache:
         cache_batch_split = past_key_values.batch_split(len(prefix_len_list), 1)
-    
-    if args.use_cache:
-        print("[After Draft Before Verify]past_key_values._seen_tokens", past_key_values._seen_tokens)
-        print("[After Draft Before Verify]fractal_key_values_list[0]._seen_tokens", fractal_key_values_list[0]._seen_tokens)
             
     for batch_idx in range(len(prefix_len_list)):
         prefix_len = prefix_len_list[batch_idx]
-        
-        # DEBUG
-        print("[Draft] prefix_len:", prefix_len)
-        print("[Draft] logits.shape:", logits.shape)
-        print("[Draft] slots[batch_idx][input_ids].shape:", slots[batch_idx]["input_ids"].shape)
         
         if args.use_cache:
             if slots[batch_idx]["total_new_tokens"] > 0:
@@ -167,9 +158,6 @@ def draft_forward(
             past_key_values = DynamicCache.from_batch_splits(cache_batch_split)
         
         slots[batch_idx]["input_ids"] = slots[batch_idx]["input_ids"] [:, :prefix_len]
-        
-        # DEBUG
-        print("[Draft] slots[batch_idx][input_ids].shape:", slots[batch_idx]["input_ids"].shape)
         
         for i in range(prefix_len, prefix_len + (args.draft_len*2)+1):
             token_logits = logits[batch_idx, i-1, :]
@@ -181,8 +169,6 @@ def draft_forward(
     performance_dict["draft_time"] += draft_time        
     
     return slots, outputs
-
-
 
 def verify_forward(
     args,
@@ -254,9 +240,9 @@ def verify_forward(
 
         for pos in range((args.draft_len*2)):
             pos = pos + slot_data["current_input_ids"].shape[1] - (args.draft_len*2) - 1
-            token_logits = logits[i, pos, :]
+            token_logits = logits[i, pos-1, :]
             verify_pred_id = torch.argmax(token_logits).item()
-            curr_id = slot_data["current_input_ids"][0, pos+1].item()
+            curr_id = slot_data["current_input_ids"][0, pos].item()
             
             if args.print_draft:
                 pred_str = tokenizer.decode(verify_pred_id)
@@ -459,58 +445,11 @@ class ParallelSPGenerator(nn.Module):
             
             if self.args.use_cache:
                 past_key_values = _verify_out.past_key_values
-                
-                if past_key_values.get_seq_length() > 0:
-                    slot_data = active_slots[0]  # 혹은 self.slots[0] 등
-                    fractal_cache = fractal_key_values_list[0]  # 프랙탈 캐시도 하나만 있다고 가정
-
-                    # (A) 길이 확인
-                    fractal_prefix_len = fractal_cache.get_seq_length()  # 프랙탈 캐시가 본 prefix 길이
-                    main_prefix_len    = past_key_values.get_seq_length() # 메인 캐시 길이
-
-                    # "아직 프랙탈이 안 본 길이" => new_len
-                    new_len = main_prefix_len - fractal_prefix_len
-                    if new_len < 0:
-                        new_len = 0
-
-                    # (B) 현재 slot의 input_ids (shape: (1, total_seq_len))
-                    input_ids_2d = slot_data["input_ids"]
-                    total_seq_len = input_ids_2d.shape[1]
-
-                    # clamp
-                    if new_len > total_seq_len:
-                        new_len = total_seq_len
-
-                    # (C) new_len > 0 이면, 그만큼 슬라이싱
-                    if new_len > 0:
-                        # 맨 끝에서 new_len개의 토큰을 떼온다
-                        needed_input = input_ids_2d[:, -new_len:]  # shape (1, new_len)
-                    else:
-                        # 갱신할 부분 없으면 빈 텐서
-                        needed_input = torch.zeros(
-                            (1,0),
-                            dtype=input_ids_2d.dtype,
-                            device=input_ids_2d.device
-                        )
-
-                    # ------------------------------------------------
-                    # 3) 프랙탈 캐시만 보충 계산
-                    #    (메인 캐시는 이미 완료)
-                    # ------------------------------------------------
-                    if new_len > 0:
-                        fractal_key_values_list = self.model.compute_fractal_key_values(
-                            input_ids=needed_input,           # (1, new_len)짜리
-                            attention_mask=None,             # 필요하다면 직접 생성. 여기서는 None->함수 내부에서 처리
-                            past_key_values=past_key_values, # 메인 캐시 (길이=main_prefix_len)
-                            fractal_key_values_list=fractal_key_values_list,
-                            use_cache=True
-                        )
-                    print("[After Verify] past_key_values.get_seq_length()", past_key_values.get_seq_length())
-                    print("[After Verify] fractal_key_values_list[0].get_seq_length()", fractal_key_values_list[0].get_seq_length())
-                    input()
+                fractal_key_values_list = _verify_out.fractal_key_values_list
 
             for s in active_slots:
                 if not s["continue_draft"]:
+                    print(">> Generated text:", self.tokenizer.decode(s["input_ids"][0]))
                     s["active"] = False
                     self._fill_slot(s)
 

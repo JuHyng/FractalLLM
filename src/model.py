@@ -151,8 +151,6 @@ class FractalLlamaModel(LlamaPreTrainedModel):
         all_self_attns = () if output_attentions else None
 
         fidx = 0 # index of fractal_key_values_list
-        # DEBUG
-        # print("fractal_key_values_list", fractal_key_values_list)
         
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             if output_hidden_states:
@@ -227,91 +225,6 @@ class FractalLlamaModel(LlamaPreTrainedModel):
         )
         
         return output if return_dict else output.to_tuple()
-    
-    def compute_fractal_key_values(
-        self,
-        input_ids: torch.LongTensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        fractal_key_values_list: Optional[List[Cache]] = None,
-        use_cache: bool = True,
-        output_attentions: bool = False,
-        prefix_len_list: Optional[List[int]] = None,
-        return_dict: bool = True,
-        **flash_attn_kwargs,
-    ) -> List[Cache]:
-
-        if not use_cache:
-            return fractal_key_values_list
-
-        if fractal_key_values_list is None:
-            fractal_key_values_list = []
-            for layer in self.layers:
-                if isinstance(layer, FractalLlamaDecoderLayer):
-                    fractal_key_values_list.append(DynamicCache())
-            if len(fractal_key_values_list) == 0:
-                return []
-
-        inputs_embeds = self.embed_tokens(input_ids)
-        batch_size, seq_len_new, _ = inputs_embeds.shape
-
-        if past_key_values is None:
-            past_key_values = DynamicCache()
-        past_seen_tokens = past_key_values.get_seq_length()
-
-        if position_ids is None:
-            base_range = torch.arange(
-                past_seen_tokens, past_seen_tokens + seq_len_new, device=inputs_embeds.device
-            )
-            position_ids = base_range.unsqueeze(0).expand(batch_size, seq_len_new)
-
-        if attention_mask is None:
-            # 가장 단순: 전부 1로 만들어, "새 토큰" 구간 전체를 attend하게 함
-            total_len = past_seen_tokens + seq_len_new
-            attention_mask = torch.ones((batch_size, total_len), dtype=torch.long, device=inputs_embeds.device)
-
-        # 4) causal_mask 생성
-        causal_mask = self._update_causal_mask(
-            attention_mask=attention_mask,
-            input_tensor=inputs_embeds,
-            cache_position=position_ids[0],  # (seq_len_new,)에서 첫 배치 사용
-            past_key_values=None,  # 여기서는 메인 캐시로 인한 SDPA mask를 굳이 고려치 않을 수도
-            output_attentions=output_attentions,
-        )
-
-        hidden_states = inputs_embeds
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-        fractal_index = 0  # fractal_key_values_list 인덱스
-        for layer_idx, decoder_layer in enumerate(self.layers):
-            if not isinstance(decoder_layer, FractalLlamaDecoderLayer):
-                continue
-
-            fractal_key_value = fractal_key_values_list[fractal_index]
-            fractal_index += 1
-
-            layer_out = decoder_layer(
-                input_ids=input_ids,              # (batch, seq_len_new)
-                hidden_states=hidden_states,      # (batch, seq_len_new, hidden_dim)
-                attention_mask=causal_mask,       # shape => (batch, 1, seq_len_new, total_len)
-                position_ids=position_ids,
-                past_key_value=None,              # 메인 캐시를 굳이 안 씀 or pass_key_values
-                fractal_key_value=fractal_key_value,  # <== 여기서 업데이트
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-                cache_position=position_ids[0],  # or torch.arange(...)
-                position_embeddings=position_embeddings,
-                prefix_len_list=prefix_len_list,
-                skip_original=True,
-            )
-            if output_attentions:
-                hidden_states = layer_out[0]
-            else:
-                hidden_states = layer_out[0]
-
-        return fractal_key_values_list
-    
 
     def _update_causal_mask(
         self,
@@ -662,11 +575,7 @@ class FractalModule(torch.nn.Module):
                     prefix_len = 1
                     # cache_batch_split[batch_idx].crop(-draft_len)
                     ## DEBUG
-                    print("[FractalModule]cache_batch_split[batch_idx].get_seq_length()", cache_batch_split[batch_idx].get_seq_length())
                 fractal_key_value = FractalCache.from_batch_splits(cache_batch_split)
-
-            print("[FractalModule] draft_len", draft_len)
-            print("[FractalModule] prefix_len", prefix_len)
             
             for i in range(prefix_len, prefix_len + draft_len):
                 token_logits = fractal_logits[batch_idx, i-1, :]
@@ -681,19 +590,10 @@ class FractalModule(torch.nn.Module):
                     dtype=input_ids.dtype # input_ids와 동일한 데이터 타입 사용
                     )
                     input_ids = torch.cat([input_ids, token_tensor], dim=1)
-                    print("[FractalModule] i: ", i, "token_pred: ", token_pred)
-                    print("one token added")
-                    print("[FractalModule]input_ids.shape", input_ids.shape)
-                    # input()
+
                 else:
                     input_ids[batch_idx, i] = token_pred
-                    print("[FractalModule] i: ", i, "token_pred: ", token_pred)
-                    print("[FractalModule]input_ids.shape", input_ids.shape)
-                    # input()
-                    
-                
-            # print("[FractalModule]input_ids", input_ids[batch_idx, :])
-            # print(f"[FractalModule]decoded tokens of layer_idx {layer_idx}: \n", self.tokenizer.decode(input_ids[batch_idx, -draft_len:]))
+            
         
         new_seq_len = input_ids.shape[1]
         fractal_emb = self.fractal_embedding(input_ids)
@@ -896,7 +796,6 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
     ):
         if prefix_len_list is not None:
             prefix_len = prefix_len_list[0]
-            print("[Before Exchange] decoded input_ids: ", input_ids[0, :prefix_len])
             
         if not self.is_verify:
             fractal_out = self.fractal_module(
@@ -919,7 +818,6 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
             )
             
             prefix_len = prefix_len_list[0]
-            print("[Before Exchange] decoded input_ids: ", input_ids[0, :prefix_len])
             if skip_original: # cache 구현용, 의미없음
                 return None
             
@@ -927,12 +825,6 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
             
             if hidden_states.device != fractal_hidden_states.device:
                 fractal_hidden_states = fractal_hidden_states.to(hidden_states.device)
-                
-            # DEBUG
-            print("[FractalLlamaDecoderLayer]input_ids.shape", input_ids.shape)
-            print("[FractalLlamaDecoderLayer]fractal_hidden_states.shape", fractal_hidden_states.shape)
-            print("[FractalLlamaDecoderLayer]hidden_states.shape", hidden_states.shape)
-            
         
             new_hiddens=[]
             for batch_idx in range(len(prefix_len_list)):
@@ -943,20 +835,14 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
 
                 fractal_part = fractal_hidden_states[batch_idx, (prefix_len) : (prefix_len) + (self.draft_len + fidx+1), :]
                 
-                print("[FractalLlamaDecoderLayer]prefix_part.shape", prefix_part.shape)
-                print("[FractalLlamaDecoderLayer]fractal_part.shape", fractal_part.shape)
-                
                 rest_part = original_part[(prefix_len) + (self.draft_len + fidx+1) :, :]
                 
-                print("[FractalLlamaDecoderLayer]rest_part.shape", rest_part.shape)
                 combined_part = torch.cat((prefix_part, fractal_part, rest_part), dim=0)
                 combined_part = combined_part.unsqueeze(0)  # shape=(1, new_seq_len, hidden_dim)
 
                 new_hiddens.append(combined_part)
                 
             hidden_states = torch.cat(new_hiddens, dim=0)
-
-            input()
 
         results = self.decoder_layer(
             hidden_states=hidden_states,

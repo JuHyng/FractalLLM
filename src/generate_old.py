@@ -116,10 +116,6 @@ def draft_forward(
         leftover_len_list=leftover_len_list
     )
     
-    target_device = next(model.parameters()).device      # ex) cuda:2
-    batch_input_ids      = batch_input_ids.to(target_device, non_blocking=True)
-    batch_attention_mask = batch_attention_mask.to(target_device, non_blocking=True)
-    
     start_t = time.time()
 
     if args.use_cache:
@@ -155,14 +151,21 @@ def draft_forward(
     for batch_idx in range(len(prefix_len_list)):
         prefix_len = prefix_len_list[batch_idx]
         
+        # DEBUG
+        print("[Draft] prefix_len:", prefix_len)
+        
         if args.use_cache:
             if slots[batch_idx]["total_new_tokens"] > 0:
                 prefix_len = 1
             cache_batch_split[batch_idx].crop(-(args.draft_len+1))
             past_key_values = DynamicCache.from_batch_splits(cache_batch_split)
         
-        slots[batch_idx]["input_ids"] = slots[batch_idx]["input_ids"] [:, :-slots[batch_idx]["final_draft_len"]]
-        for i in range(prefix_len, prefix_len + slots[batch_idx]["final_draft_len"]+1):
+        slots[batch_idx]["input_ids"] = slots[batch_idx]["input_ids"] [:, :prefix_len]
+        
+        # DEBUG
+        print("[Draft] slots[batch_idx][input_ids].shape:", slots[batch_idx]["input_ids"].shape)
+        
+        for i in range(prefix_len, prefix_len + (args.draft_len*2)+1):
             token_logits = logits[batch_idx, i-1, :]
             token_prob = token_logits
             token_pred = torch.argmax(token_prob).item()
@@ -183,153 +186,112 @@ def verify_forward(
     draft_mode_func,
     prefix_len_list: List[int],
     performance_dict: dict,
-    past_key_values: Optional[Cache] = None,
-    max_length: Optional[int] = None,
+    past_key_values:Optional[Cache]=None,
+    max_length:Optional[int]=None,
 ):
-    """
-    ▸ 드래프트 토큰을 검증하고, 맞은/틀린 토큰 수에 따라 슬롯 상태를 업데이트한다.
-    ▸ performance_dict에 누적 토큰 기반 가중 평균 accept_ratio를 기록한다.
-    """
-    # 1) 모델을 verify-mode로 전환
     draft_mode_func(model, is_verify=True)
+    
     performance_dict["model_forward_count"]["verify"] += 1
     start_t = time.time()
-
-    # 2) 이번 스텝에서 active 상태인 슬롯만 추출
+    
     active_idx = [i for i, s in enumerate(slots) if s["continue_draft"]]
     if not active_idx:
         return slots, None, 0
-
-    # 3) 캐시 관련 len 정보 (leftover_len_list) 계산
+    
     if args.use_cache and past_key_values is not None:
         cache_batch_split = past_key_values.batch_split(len(prefix_len_list), 1)
         leftover_len_list = [cbs.get_seq_length() for cbs in cache_batch_split]
     else:
-        leftover_len_list = [0] * len(prefix_len_list)
-
+        leftover_len_list = [0]*len(prefix_len_list)
+        
     slots = [slots[i] for i in active_idx]
 
-    # 4) 배치 입력(Tensor) 구성
     batch_input_ids, batch_attention_mask, slot_map, max_len = pad_and_combine_slots(
         slots,
         pad_token_id=tokenizer.pad_token_id,
-        leftover_len_list=leftover_len_list,
+        leftover_len_list=leftover_len_list
     )
-
-    target_device = next(model.parameters()).device
-    batch_input_ids = batch_input_ids.to(target_device, non_blocking=True)
-    batch_attention_mask = batch_attention_mask.to(target_device, non_blocking=True)
-
-    # 5) cache_position (use_cache=True일 때) 계산
+    
+    
     if args.use_cache:
         past_seen_tokens = past_key_values.get_seq_length()
-        seq_len_new = batch_input_ids.size(1)
+        seq_len_new = batch_input_ids.size(1)     
+        
+        print("[Draft] past_seen_tokens:", past_seen_tokens)
+        print("[Draft] seq_len_new:", seq_len_new)
+        
         cache_position = torch.arange(
-            past_seen_tokens,
-            past_seen_tokens + seq_len_new,
-            device=batch_input_ids.device,
+            past_seen_tokens, 
+            past_seen_tokens + seq_len_new, 
+            device=batch_input_ids.device
         )
-    else:
-        cache_position = None
-
-    # 6) 모델 forward
+        print("[Draft] cache_position:", cache_position)
+    
     with torch.no_grad():
         outputs = model.forward(
             input_ids=batch_input_ids,
-            # attention_mask=batch_attention_mask,  # 필요 시 주석 해제
+            # attention_mask=batch_attention_mask,
             use_cache=args.use_cache,
             past_key_values=past_key_values if args.use_cache else None,
-            cache_position=cache_position,
+            cache_position=cache_position if args.use_cache else None,
         )
-
+        
     logits = outputs.logits
-
-    # ────────────────────────────────────────────────────────────────
-    # 7) Verify 각 슬롯 & 가중 평균 계산용 토큰 카운팅
-    # ────────────────────────────────────────────────────────────────
-    matched_tokens_step = 0   # 이번 verify-step에서 맞은 토큰 총수
-    checked_tokens_step = 0   # 이번 verify-step에서 검사한 토큰 총수
-    verified_count_last   = 0 # 마지막 슬롯 verified 토큰 수 (호환성 유지용)
-
-    for i, slot_data in enumerate(slots):
+    
+    for i, slot_data in enumerate(slots):        
         verified_count = 0
-        total_checked = slot_data["final_draft_len"] + 1
+        total_checked = (args.draft_len*2)
         fail_draft = False
-        first_fail_id = None
+        first_fail_label = None
 
-        # (A) 토큰별 검증
-        for j in range(total_checked):
-            pos = (
-                j
-                + slot_data["current_input_ids"].shape[1]
-                - (total_checked + 1)
-            )
+        for pos in range((args.draft_len*2)):
+            pos = pos + slot_data["current_input_ids"].shape[1] - (args.draft_len*2) - 1
             token_logits = logits[i, pos, :]
             verify_pred_id = torch.argmax(token_logits).item()
-            curr_id = slot_data["current_input_ids"][0, pos + 1].item()
+            curr_id = slot_data["current_input_ids"][0, pos+1].item()
+            
+            if args.print_draft:
+                pred_str = tokenizer.decode(verify_pred_id)
+                curr_str = tokenizer.decode(curr_id)
 
             if verify_pred_id == curr_id:
+                if args.print_draft:
+                    print(f"[Verify] MATCH: slot {i} at position {pos}: {pred_str} (current: {curr_str})")
                 verified_count += 1
             else:
+                if args.print_draft:
+                    print(f"[Verify] MISMATCH: slot {i} position {pos}: {pred_str} (current: {curr_str})")
+                
                 fail_draft = True
-                first_fail_id = verify_pred_id
-                break  # mismatch 발견 즉시 중단
+                first_fail_label = verify_pred_id
+                break
 
-        # (B) 가중 합산용 카운터 누적
-        matched_tokens_step += verified_count
-        checked_tokens_step += total_checked
-        verified_count_last = verified_count  # 마지막 슬롯 값을 갱신
+        accept_ratio = float(verified_count) / float(total_checked)
+        slot_data["accept_ratio"] = accept_ratio
+        performance_dict["accept_ratio"] = accept_ratio
 
-        # (C) 슬롯별 accept_ratio(참고용) 저장
-        slot_data["accept_ratio_slot"] = verified_count / total_checked
-
-        # (D) 토큰 교정 및 상태 갱신
-        if fail_draft and first_fail_id is not None:
-            keep = verified_count            # 맞은 토큰 수
-            pre_ids = slot_data["input_ids"][:, : -(total_checked - keep)]
-            label_tensor = torch.tensor(
-                [[first_fail_id]],
-                device=pre_ids.device,
-                dtype=pre_ids.dtype,
-            )
+        if fail_draft and first_fail_label is not None:
+            pre_ids = slot_data["input_ids"][:, :-((args.draft_len*2)+1 - verified_count)]
+            label_tensor = torch.tensor([[first_fail_label]], 
+                                device=pre_ids.device, dtype=pre_ids.dtype)
             slot_data["input_ids"] = torch.cat([pre_ids, label_tensor], dim=-1)
-            added = keep + 1                 # mismatch 포함
-        else:
-            added = verified_count           # 모두 일치했으면 그대로
-
-        slot_data["total_new_tokens"] += added
-        performance_dict["new_tokens"] += added
-        slot_data["continue_draft"] = slot_data["total_new_tokens"] < max_length
-
-        # prompt 길이를 제외한 실제 신규 토큰 수
-        slot_data["total_new_tokens"] = (
-            slot_data["input_ids"].shape[1] - slot_data["prompt_len"]
-        )
-
-    # ────────────────────────────────────────────────────────────────
-    # 8) performance_dict 누적 & 가중 평균 accept_ratio 계산
-    # ────────────────────────────────────────────────────────────────
-    performance_dict.setdefault("matched_tokens", 0)
-    performance_dict.setdefault("checked_tokens", 0)
-
-    performance_dict["matched_tokens"] += matched_tokens_step
-    performance_dict["checked_tokens"] += checked_tokens_step
-
-    if performance_dict["checked_tokens"]:
-        performance_dict["accept_ratio"] = (
-            performance_dict["matched_tokens"] / performance_dict["checked_tokens"]
-        )
-    else:
-        performance_dict["accept_ratio"] = 0.0
-
-    verify_time = time.time() - start_t
-    performance_dict["verify_time"] += verify_time
-
-    # verified_count_last는 이전 API를 깨뜨리지 않기 위해 그대로 반환
-    return slots, outputs, verified_count_last
-
-    
+            slot_data["total_new_tokens"] += (verified_count+1) # +1: mismatch token
+            slot_data["continue_draft"] = True 
+            performance_dict["new_tokens"]+= (verified_count+1)
             
+        else:
+            slot_data["continue_draft"] = True  
+            slot_data["total_new_tokens"] += verified_count
+            performance_dict["new_tokens"] += verified_count
+            
+        if slot_data["total_new_tokens"] >= max_length:
+            slot_data["continue_draft"] = False
+                
+        verify_time = time.time() - start_t
+        performance_dict["verify_time"] += verify_time
+
+    return slots, outputs, verified_count 
+        
 
 class ParallelSPGenerator(nn.Module):
     def __init__(
@@ -382,9 +344,6 @@ class ParallelSPGenerator(nn.Module):
         slot["continue_draft"] = True
         slot["draft_iteration"] = 0
         slot["total_new_tokens"] = 0
-        slot["final_draft_len"] = 0
-        slot["prompt_len"] = slot["input_ids"].shape[1]
-
         
     def forward(self):
         for s in self.slots:
@@ -412,24 +371,11 @@ class ParallelSPGenerator(nn.Module):
             prefix_len_list = []
             for slot in active_slots:
                 prefix_len_list.append(slot["input_ids"].shape[1])
+                
+            for slot in active_slots:
                 slot["draft_iteration"] += 1
-                slot["total_new_tokens"] = slot["input_ids"].shape[1] - slot["prompt_len"]
-                
-                remaining = self.max_length - slot["total_new_tokens"]
-                if remaining <= 0:                      # 더 못 붙이면 드래프트 중단
-                    slot["continue_draft"] = False
-                    continue
-
-                final_draft_len = min(self.args.draft_len, remaining)
-
-                # 3️⃣ draft_ids 잘라서 붙이기
-                draft_ids_trunc = draft_ids[:final_draft_len]
-                draft_t = torch.tensor([draft_ids_trunc],
-                                    device=slot["input_ids"].device)
+                draft_t = torch.tensor([draft_ids], device=slot["input_ids"].device)
                 slot["input_ids"] = torch.cat([slot["input_ids"], draft_t], dim=-1)
-                
-                slot["final_draft_len"] = final_draft_len
-
                 
             
             cache_batch_split = None
