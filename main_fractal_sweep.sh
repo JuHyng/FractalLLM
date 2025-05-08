@@ -1,20 +1,24 @@
 wandb online
 
-for dataset in gsm8k xsum
+# export CUDA_VISIBLE_DEVICES=0
+
+for dataset in gsm8k
 do
 python main.py \
-    --model_name meta-llama/Llama-2-7b-hf \
+    --model_name meta-llama/Llama-3.2-1B \
     --draft_token "[DRAFT{i}]" \
     --decode_method fractal \
     --decomp_method quant_8bit \
-    --draft_len 24 \
-    --draft_layer_indexes 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31\
+    --draft_len 8 \
+    --draft_layer_indexes 4 6 8 10\
     --split train \
     --output_dir ./ \
     --dataset $dataset \
     --max_samples 100 \
     --num_beams 1 \
-    --n_fewshot 2 \
+    --n_fewshot 0 \
     --use_cache False \
-    --print_draft False
+    --print_draft False \
+    --device_map "cuda:2"
 done
+

@@ -11,5 +11,8 @@ python main.py \
     --max_samples 100 \
     --num_beams 1 \
     --n_fewshot 2 \
+    --device_map "cuda:0" \
     --use_cache False
 done
+
+# meta-llama/Llama-3.2-1B

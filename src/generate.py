@@ -116,6 +116,10 @@ def draft_forward(
         leftover_len_list=leftover_len_list
     )
     
+    target_device = next(model.parameters()).device      # ex) cuda:2
+    batch_input_ids      = batch_input_ids.to(target_device, non_blocking=True)
+    batch_attention_mask = batch_attention_mask.to(target_device, non_blocking=True)
+    
     start_t = time.time()
 
     if args.use_cache:
@@ -132,7 +136,7 @@ def draft_forward(
     with torch.no_grad():
         outputs = model.forward(
             input_ids=batch_input_ids,
-            # attention_mask=batch_attention_mask,
+            attention_mask=batch_attention_mask,
             use_cache=args.use_cache,
             past_key_values=past_key_values if args.use_cache else None,
             fractal_key_values_list=fractal_key_values_list if args.use_cache else None,
@@ -153,6 +157,8 @@ def draft_forward(
         
         # DEBUG
         print("[Draft] prefix_len:", prefix_len)
+        print("[Draft] logits.shape:", logits.shape)
+        print("[Draft] slots[batch_idx][input_ids].shape:", slots[batch_idx]["input_ids"].shape)
         
         if args.use_cache:
             if slots[batch_idx]["total_new_tokens"] > 0:
@@ -165,8 +171,7 @@ def draft_forward(
         # DEBUG
         print("[Draft] slots[batch_idx][input_ids].shape:", slots[batch_idx]["input_ids"].shape)
         
-        slot_total_len = slots[batch_idx]["final_draft_len"]
-        for i in range(prefix_len, prefix_len + (slot_total_len*2)+1):
+        for i in range(prefix_len, prefix_len + (args.draft_len*2)+1):
             token_logits = logits[batch_idx, i-1, :]
             token_prob = token_logits
             token_pred = torch.argmax(token_prob).item()
@@ -212,7 +217,9 @@ def verify_forward(
         pad_token_id=tokenizer.pad_token_id,
         leftover_len_list=leftover_len_list
     )
-    
+    target_device = next(model.parameters()).device      # ex) cuda:2
+    batch_input_ids      = batch_input_ids.to(target_device, non_blocking=True)
+    batch_attention_mask = batch_attention_mask.to(target_device, non_blocking=True)
     
     if args.use_cache:
         past_seen_tokens = past_key_values.get_seq_length()
@@ -231,7 +238,7 @@ def verify_forward(
     with torch.no_grad():
         outputs = model.forward(
             input_ids=batch_input_ids,
-            # attention_mask=batch_attention_mask,
+            attention_mask=batch_attention_mask,
             use_cache=args.use_cache,
             past_key_values=past_key_values if args.use_cache else None,
             cache_position=cache_position if args.use_cache else None,
@@ -241,13 +248,12 @@ def verify_forward(
     
     for i, slot_data in enumerate(slots):        
         verified_count = 0
-        slot_total_len = slots[0]["final_draft_len"]
-        total_checked = (slot_total_len*2)
+        total_checked = (args.draft_len*2)
         fail_draft = False
         first_fail_label = None
 
-        for pos in range((slot_total_len*2)):
-            pos = pos + slot_data["current_input_ids"].shape[1] - (slot_total_len*2) - 1
+        for pos in range((args.draft_len*2)):
+            pos = pos + slot_data["current_input_ids"].shape[1] - (args.draft_len*2) - 1
             token_logits = logits[i, pos, :]
             verify_pred_id = torch.argmax(token_logits).item()
             curr_id = slot_data["current_input_ids"][0, pos+1].item()
@@ -273,7 +279,7 @@ def verify_forward(
         performance_dict["accept_ratio"] = accept_ratio
 
         if fail_draft and first_fail_label is not None:
-            pre_ids = slot_data["input_ids"][:, :-((slot_total_len*2)+1 - verified_count)]
+            pre_ids = slot_data["input_ids"][:, :-((args.draft_len*2)+1 - verified_count)]
             label_tensor = torch.tensor([[first_fail_label]], 
                                 device=pre_ids.device, dtype=pre_ids.dtype)
             slot_data["input_ids"] = torch.cat([pre_ids, label_tensor], dim=-1)
@@ -346,7 +352,6 @@ class ParallelSPGenerator(nn.Module):
         slot["continue_draft"] = True
         slot["draft_iteration"] = 0
         slot["total_new_tokens"] = 0
-        slot["final_draft_len"] = 0
         
     def forward(self):
         for s in self.slots:
@@ -374,24 +379,11 @@ class ParallelSPGenerator(nn.Module):
             prefix_len_list = []
             for slot in active_slots:
                 prefix_len_list.append(slot["input_ids"].shape[1])
-                slot["draft_iteration"] += 1
-
-                remaining = self.max_length - slot["total_new_tokens"]
-                print("[Draft] remaining:", remaining)
-                if remaining <= 0:                      # 더 못 붙이면 드래프트 중단
-                    slot["continue_draft"] = False
-                    continue
-
-                final_draft_len = min(self.args.draft_len, remaining)
-                print("[Draft] draft_len_slot:", final_draft_len)
-
-                # 3️⃣ draft_ids 잘라서 붙이기
-                draft_ids_trunc = draft_ids[:final_draft_len]
-                draft_t = torch.tensor([draft_ids_trunc],
-                                    device=slot["input_ids"].device)
-                slot["input_ids"] = torch.cat([slot["input_ids"], draft_t], dim=-1)
                 
-                slot["final_draft_len"] = final_draft_len
+            for slot in active_slots:
+                slot["draft_iteration"] += 1
+                draft_t = torch.tensor([draft_ids], device=slot["input_ids"].device)
+                slot["input_ids"] = torch.cat([slot["input_ids"], draft_t], dim=-1)
                 
             
             cache_batch_split = None

@@ -65,6 +65,20 @@ def load_wmt16(
         for ex in ds
     ]
 
+def load_human_eval(
+    split: str = "test",
+    repo_id: str = "openai/openai_humaneval",
+    max_samples: Optional[int] = None,
+) -> List[Tuple[str, str]]:
+    ds = hf_load_dataset(repo_id, split=split)
+    if max_samples:
+        ds = ds.select(range(max_samples))
+
+    # 그대로 반환 (별도 템플릿 불필요)
+    return [
+        (ex["prompt"].strip(), ex["canonical_solution"].strip())
+        for ex in ds
+    ]
 
 def load_xsum(
     split: str = "train",
@@ -132,6 +146,7 @@ def load_dataset(args) -> Tuple[List[Tuple[str, str]], int]:
         "cnn_dm": (load_cnn_dm, 128),
         "wmt16": (load_wmt16, 64),
         "xsum":  (load_xsum, 128),
+        "human_eval": (load_human_eval, 512),
     }
     if args.dataset not in mapping:
         raise ValueError(f"Invalid dataset: {args.dataset!r}")

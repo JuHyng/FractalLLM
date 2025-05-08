@@ -658,13 +658,22 @@ class FractalModule(torch.nn.Module):
                     ## DEBUG
                     print("[FractalModule]cache_batch_split[batch_idx].get_seq_length()", cache_batch_split[batch_idx].get_seq_length())
                 fractal_key_value = FractalCache.from_batch_splits(cache_batch_split)
-               
-            for i in range(prefix_len, prefix_len + draft_len):
+            
+            final_len = input_ids.shape[1]  - prefix_len 
+            
+            # DEBUG
+            # print("[FractalModule]final_len", final_len)
+            # print("[FractalModule]prefix_len", prefix_len)
+            
+            for i in range(prefix_len, prefix_len + final_len):
                 token_logits = fractal_logits[batch_idx, i-1, :]
                 # token_prob = torch.softmax(token_logits, dim=-1)
                 token_prob = token_logits
                 token_pred = torch.argmax(token_prob).item()
                 input_ids[batch_idx, i] = token_pred
+                ### DEBUG
+                # print("[FractalModule] i: ", i, "token_pred: ", token_pred)
+                # input()
                 
             # print("[FractalModule]input_ids", input_ids[batch_idx, :])
             # print(f"[FractalModule]decoded tokens of layer_idx {layer_idx}: \n", self.tokenizer.decode(input_ids[batch_idx, -draft_len:]))
@@ -883,6 +892,11 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
             if hidden_states.device != fractal_hidden_states.device:
                 fractal_hidden_states = fractal_hidden_states.to(hidden_states.device)
             
+            # # DEBUG
+            # print("[FractalLlamaDecoderLayer]input_ids.shape", input_ids.shape)
+            # print("[FractalLlamaDecoderLayer]fractal_hidden_states.shape", fractal_hidden_states.shape)
+            # print("[FractalLlamaDecoderLayer]hidden_states.shape", hidden_states.shape)
+            
             new_hiddens=[]
             for batch_idx in range(len(prefix_len_list)):
                 prefix_len = prefix_len_list[batch_idx]
@@ -892,13 +906,19 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
 
                 fractal_part = fractal_hidden_states[batch_idx, prefix_len : prefix_len + self.draft_len, :]
                 
+                # print("[FractalLlamaDecoderLayer]prefix_part.shape", prefix_part.shape)
+                # print("[FractalLlamaDecoderLayer]fractal_part.shape", fractal_part.shape)
+                
                 rest_part = original_part[prefix_len + self.draft_len :, :]
+                
+                # print("[FractalLlamaDecoderLayer]rest_part.shape", rest_part.shape)
                 combined_part = torch.cat((prefix_part, fractal_part, rest_part), dim=0)
                 combined_part = combined_part.unsqueeze(0)  # shape=(1, new_seq_len, hidden_dim)
 
                 new_hiddens.append(combined_part)
                 
             hidden_states = torch.cat(new_hiddens, dim=0)
+            
 
         results = self.decoder_layer(
             hidden_states=hidden_states,

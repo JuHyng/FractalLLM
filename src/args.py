@@ -162,18 +162,60 @@ class GenerationArguments:
         metadata={"help": "Use cache for faster decoding."},
     )
 
+from dataclasses import dataclass, field
+
+@dataclass
+class LayerSweepArguments:
+    """
+    Boolean flags (0/1) indicating whether each layer is used in draft routing.
+    Up to 8 layers will be sampled in main_sweep.py.
+    """
+    layer_0:  int = field(default=0, metadata={"help": "Use layer 0 in draft routing"})
+    layer_1:  int = field(default=0)
+    layer_2:  int = field(default=0)
+    layer_3:  int = field(default=0)
+    layer_4:  int = field(default=0)
+    layer_5:  int = field(default=0)
+    layer_6:  int = field(default=0)
+    layer_7:  int = field(default=0)
+    layer_8:  int = field(default=0)
+    layer_9:  int = field(default=0)
+    layer_10: int = field(default=0)
+    layer_11: int = field(default=0)
+    layer_12: int = field(default=0)
+    layer_13: int = field(default=0)
+    layer_14: int = field(default=0)
+    layer_15: int = field(default=0)
+    layer_16: int = field(default=0)
+    layer_17: int = field(default=0)
+    layer_18: int = field(default=0)
+    layer_19: int = field(default=0)
+    layer_20: int = field(default=0)
+    layer_21: int = field(default=0)
+    layer_22: int = field(default=0)
+    layer_23: int = field(default=0)
+    layer_24: int = field(default=0)
+    layer_25: int = field(default=0)
+    layer_26: int = field(default=0)
+    layer_27: int = field(default=0)
+    layer_28: int = field(default=0)
+    layer_29: int = field(default=0)
+    layer_30: int = field(default=0)
+    layer_31: int = field(default=0)
+
+
 def get_args():
     
-    parser = HfArgumentParser((ModelArguments, TrainingArguments, DataArguments, GenerationArguments))
+    parser = HfArgumentParser((ModelArguments, TrainingArguments, DataArguments, GenerationArguments, LayerSweepArguments))
     
-    model_args, training_args, data_args, gen_args = parser.parse_args_into_dataclasses()
+    model_args, training_args, data_args, gen_args, layer_sweep_args= parser.parse_args_into_dataclasses()
     @dataclass
     class CombinedArgs:
         pass
     
     combined_args = CombinedArgs()
     
-    for obj in [model_args, training_args, data_args, gen_args]:
+    for obj in [model_args, training_args, data_args, gen_args, layer_sweep_args]:
         for key, value in vars(obj).items():
             setattr(combined_args, key, value)
     
