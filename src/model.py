@@ -571,12 +571,8 @@ class FractalModule(torch.nn.Module):
             
             if use_cache and cache_batch_split is not None:
                 if cache_batch_split[batch_idx].get_seq_length() > 0:
-                    # print("cache_batch_split[batch_idx].get_seq_length()", cache_batch_split[batch_idx].get_seq_length())
                     prefix_len = 1
-                    # cache_batch_split[batch_idx].crop(-draft_len)
-                    ## DEBUG
                 fractal_key_value = FractalCache.from_batch_splits(cache_batch_split)
-            
             for i in range(prefix_len, prefix_len + draft_len):
                 token_logits = fractal_logits[batch_idx, i-1, :]
                 # token_prob = torch.softmax(token_logits, dim=-1)
@@ -593,7 +589,9 @@ class FractalModule(torch.nn.Module):
 
                 else:
                     input_ids[batch_idx, i] = token_pred
-            
+        
+        if use_cache:
+            fractal_key_value.crop(-draft_len)   
         
         new_seq_len = input_ids.shape[1]
         fractal_emb = self.fractal_embedding(input_ids)
@@ -792,6 +790,7 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
         prefix_len_list: Optional[List[int]] = None,
         fidx: Optional[int] = None,
         skip_original: Optional[bool] = False,
+        draft_len_current: int = 0,
         **kwargs,
     ):
         if prefix_len_list is not None:
@@ -812,11 +811,10 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
             use_cache=use_cache,
             output_attentions=output_attentions,
             cache_position=cache_position if cache_position is not None else None,
-            draft_len=self.draft_len + fidx+1,
+            draft_len=draft_len_current + fidx+1,
             prefix_len_list=prefix_len_list,
             **kwargs,
             )
-            
             prefix_len = prefix_len_list[0]
             if skip_original: # cache 구현용, 의미없음
                 return None

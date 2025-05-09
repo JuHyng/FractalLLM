@@ -19,6 +19,8 @@ python main.py \
     --n_fewshot 0 \
     --use_cache False \
     --print_draft False \
-    --device_map "cuda:2"
+    --device_map "cuda:2" \
+    --sweep False 
 done
+
 

@@ -79,6 +79,11 @@ class ModelArguments:
         metadata={"help": "Print results during drafting"},
     )
     
+    sweep: bool = field(
+        default=False,
+        metadata={"help": "Sweep the model"},
+    )
+    
 @dataclass
 class DataArguments:
     """

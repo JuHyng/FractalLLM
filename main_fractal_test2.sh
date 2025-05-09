@@ -1,4 +1,4 @@
-wandb offline
+wandb online
 
 
 for dataset in gsm8k
@@ -8,8 +8,8 @@ python main2.py \
     --draft_token "[DRAFT{i}]" \
     --decode_method fractal \
     --decomp_method quant_8bit \
-    --draft_len 3 \
-    --draft_layer_indexes 13 14 15\
+    --draft_len 4 \
+    --draft_layer_indexes 12 13 14 15\
     --split train \
     --output_dir ./ \
     --dataset $dataset \

@@ -112,6 +112,9 @@ def main():
                     logits = model(generated, use_cache=args.use_cache).logits[:, -1, :]
                     next_id = torch.argmax(logits, dim=-1, keepdim=True)
                     generated = torch.cat([generated, next_id], dim=-1)
+                    
+                    if next_id.item() == tokenizer.eos_token_id:
+                        break
             elapsed = time.time() - t0
 
             flops = flops_counter.get_total_flops()
@@ -152,6 +155,7 @@ def main():
                 "draft_time": 0.0,
                 "verify_time": 0.0,
                 "accept_ratio": 0.0,
+                
             }
             
             flops_counter_t.reset()
@@ -173,10 +177,14 @@ def main():
                     for i in range(args.draft_len):
                         if total_generated_tokens + i >= max_length:
                             break
+                        
                         draft_logits = draft_model(draft_seq, use_cache=args.use_cache).logits[:, -1, :]
                         next_id = torch.argmax(draft_logits, dim=-1, keepdim=True)
                         draft_seq = torch.cat([draft_seq, next_id], dim=-1)
                         performance_dict["model_forward_count"]["draft"] += 1
+                        
+                        if next_id.item() == tokenizer.eos_token_id:
+                            break
                         
                     t_draft = time.time() - t_draft_start
                     performance_dict["draft_time"] += t_draft
@@ -226,17 +234,11 @@ def main():
                             generated = torch.cat([generated, corrected_token], dim=-1)
                             total_generated_tokens += 1
                         
-                        # DEBUG
-                        # print("total_generated_tokens:", total_generated_tokens)
-                        # print("new_tokens:", generated.size(1) - prompt_len)
-
                     # Check if generation finished after this draft/verify cycle
                     if total_generated_tokens >= max_length:
                         break
 
-                    ### REMOVE DEBUG input()
                     text_out = tokenizer.decode(generated[0], skip_special_tokens=True)
-                    # print(f"[{idx}] Intermediate Generated >>> {text_out}")
                     
             accept_ratio = accept_count / total_checks if total_checks > 0 else 0.0
             elapsed = time.time() - t0
@@ -276,6 +278,9 @@ def main():
                 "draft_time": 0.0,
                 "verify_time": 0.0,
                 "accept_ratio": 0.0,
+                "elapsed": 0.0,         # ⏱️ 누적 시간
+                "tokens_per_sec": 0.0,  # ⏱️ 토큰/초 (계산용)
+                
             }
             
             gen = ParallelSPGenerator(
@@ -296,6 +301,7 @@ def main():
             elapsed = time.time() - t0
             flops = flops_counter.get_total_flops()
             new_tokens = performance_dict["new_tokens"]
+            token_per_sec = new_tokens / elapsed if elapsed > 0 else 0.0
 
             perf_spec["times"].append(elapsed)
             perf_spec["flops"].append(flops)
@@ -306,6 +312,7 @@ def main():
                 "elapsed":    elapsed,
                 "flops":      flops,
                 "new_tokens": new_tokens,
+                "token_per_sec": token_per_sec,
                 **performance_dict,
             }
             wandb.log(log_data)
@@ -315,6 +322,7 @@ def main():
             "fractal/avg_time":    sum(perf_spec["times"]) / len(perf_spec["times"]),
             "fractal/total_flops": perf_spec["flops"],
             "fractal/total_tokens": perf_spec["tokens"],
+            "fractal/avg_token_per_sec": sum(perf_spec["tokens"]) / sum(perf_spec["times"])
             **{f"model_fw_count/{k}": v for k, v in performance_dict["model_forward_count"].items()},
             "draft_time_total":   performance_dict["draft_time"],
             "verify_time_total":  performance_dict["verify_time"],
