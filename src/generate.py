@@ -136,7 +136,7 @@ def draft_forward(
     with torch.no_grad():
         outputs = model.forward(
             input_ids=batch_input_ids,
-            attention_mask=batch_attention_mask,
+            # attention_mask=batch_attention_mask,
             use_cache=args.use_cache,
             past_key_values=past_key_values if args.use_cache else None,
             fractal_key_values_list=fractal_key_values_list if args.use_cache else None,
@@ -212,9 +212,13 @@ def verify_forward(
         pad_token_id=tokenizer.pad_token_id,
         leftover_len_list=leftover_len_list
     )
-    target_device = next(model.parameters()).device      # ex) cuda:2
+    target_device = next(model.parameters()).device
     batch_input_ids      = batch_input_ids.to(target_device, non_blocking=True)
     batch_attention_mask = batch_attention_mask.to(target_device, non_blocking=True)
+    
+    # DEBUG
+    print("[Before Verify] attention_mask.shape:", batch_attention_mask.shape)
+    print("[Before Verify] attention_mask:", batch_attention_mask)
     
     if args.use_cache:
         past_seen_tokens = past_key_values.get_seq_length()
@@ -235,7 +239,7 @@ def verify_forward(
     with torch.no_grad():
         outputs = model.forward(
             input_ids=batch_input_ids,
-            attention_mask=batch_attention_mask,
+            # attention_mask=batch_attention_mask,
             use_cache=args.use_cache,
             past_key_values=past_key_values if args.use_cache else None,
             cache_position=cache_position if args.use_cache else None,
@@ -404,7 +408,7 @@ class ParallelSPGenerator(nn.Module):
             
         draft_ids = self.tokenizer.convert_tokens_to_ids(self.draft_tokens)
         
-        
+        accepted_prefix_len = []
         while not done:
             active_slots = [s for s in self.slots if s["active"]]
             if len(active_slots) == 0:
@@ -439,9 +443,10 @@ class ParallelSPGenerator(nn.Module):
                 if past_key_values.get_seq_length() > 0:
                     cache_batch_split = past_key_values.batch_split(len(active_slots), 1)
                     for i in range(len(cache_batch_split)):
-                        if cache_batch_split[i].get_seq_length() > 0:
-                            active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"][:, -(self.args.draft_len+1):] # 1(last token of prefix) + draft_tokens (draft_len+1)
-                            
+                        cache_len = cache_batch_split[i].get_seq_length()
+                        # if cache_len > 0:
+                            # active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"][:, -(self.args.draft_len+1):] # 1(last token of prefix) + draft_tokens (draft_len+1)
+                        active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"][:, (cache_len):]
 
             if cache_batch_split is None:
                 for i in range(len(active_slots)):
@@ -475,20 +480,22 @@ class ParallelSPGenerator(nn.Module):
                 if self.args.print_draft:
                     print("[After Draft] input_ids:", self.tokenizer.decode(active_slots[i]["input_ids"][0]))
                     print("[After Draft] input_ids.shape:", active_slots[i]["input_ids"].shape)
-                    print("[After Draft] past_key_values.get_seq_length()", past_key_values.get_seq_length())
-                    print("[After Draft] fractal_key_values_list[0].get_seq_length()", fractal_key_values_list[0].get_seq_length())
+                    
+                    # DEBUG layer index마다 past_key_values 출력
+                    for i in range(len(self.model.model.layers)):
+                        print(f"[After Draft] past_key_values.get_seq_length({i})", past_key_values.get_seq_length(i))
+                        print(f"[After Draft] fractal_key_values_list[0].get_seq_length{i})", fractal_key_values_list[0].get_seq_length(i))
+                
+                    # DEBUG
+                    print("prefix_len_list:", prefix_len_list)
                 
                 if past_key_values.get_seq_length() > 0:
-                    cache_batch_split = past_key_values.batch_split(len(active_slots), 1)
-                    for i in range(len(cache_batch_split)):
-                        if cache_batch_split[i].get_seq_length() > 0:
-                            active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"][:, -(1+self.args.draft_len*2+1):]
-                            cache_batch_split[i].crop(-(1+self.args.draft_len+1))
-                            print("[After Draft] current_input_ids:", active_slots[i]["current_input_ids"])
-                            print("[After Draft] current_input_ids deode:", self.tokenizer.decode(active_slots[i]["current_input_ids"][0]))
-                            print("[After Draft] current_input_ids.shape:", active_slots[i]["current_input_ids"].shape)
-                        else:
-                            active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"]
+                    past_key_values, fractal_key_values_list = crop_all_cache(
+                        past_key_values=past_key_values,
+                        fractal_key_values_list=fractal_key_values_list,
+                        prefix_len_list=prefix_len_list,
+                        active_slots=active_slots
+                    )
                     
             else:
                 for i in range(len(active_slots)):
@@ -496,6 +503,13 @@ class ParallelSPGenerator(nn.Module):
             
             if self.args.print_draft:
                 print("[After Draft] decoded text:", self.tokenizer.decode(active_slots[0]["input_ids"][0]))
+                
+            # DEBUG
+            if self.args.use_cache:
+                # DEBUG layer index마다 past_key_values 출력
+                for i in range(len(self.model.model.layers)):
+                    print(f"[After Draft after crop] past_key_values.get_seq_length({i})", past_key_values.get_seq_length(i))
+                    print(f"[After Draft after crop] fractal_key_values_list[0].get_seq_length{i})", fractal_key_values_list[0].get_seq_length(i))
 
             active_slots, _verify_out, verified_count = verify_forward(
                 slots=active_slots,
@@ -511,7 +525,15 @@ class ParallelSPGenerator(nn.Module):
             
             if self.args.use_cache:
                 past_key_values = _verify_out.past_key_values
-                fractal_key_values_list = _verify_out.fractal_key_values_list
+                
+                cache_batch_split = past_key_values.batch_split(len(active_slots), 1)
+                for i in range(len(cache_batch_split)):
+                    cache_batch_split[i].crop(prefix_len_list[i]-1)
+                past_key_values = past_key_values.from_batch_splits(cache_batch_split)
+                
+                for i in range(len(self.model.model.layers)):
+                    print(f"[After Verify after Crop] past_key_values.get_seq_length({i})", past_key_values.get_seq_length(i))
+                    print(f"[After Verify] fractal_key_values_list[0].get_seq_length{i})", fractal_key_values_list[0].get_seq_length(i))
 
             for s in active_slots:
                 if not s["continue_draft"]:
@@ -526,4 +548,31 @@ class ParallelSPGenerator(nn.Module):
         input()
         return self.performance_dict
         
+        
+def crop_all_cache(
+    past_key_values:Cache,
+    fractal_key_values_list:List[Cache],
+    prefix_len_list:List[int],
+    active_slots:List[dict],
+):
+    cache_batch_split = past_key_values.batch_split(len(active_slots), 1)
+    for i in range(len(cache_batch_split)):
+        if cache_batch_split[i].get_seq_length() > 0:
+            # active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"][:, -(1+self.args.draft_len*2+1):]
+            active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"][:, prefix_len_list[i]-1:]
+            cache_batch_split[i].crop((prefix_len_list[i]-1))
+            print("[After Draft] current_input_ids:", active_slots[i]["current_input_ids"])
+            print("[After Draft] current_input_ids.shape:", active_slots[i]["current_input_ids"].shape)
+        else:
+            active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"]
+            
+        for fractal_layer_idx in range(len(fractal_key_values_list)):
+            fcache_batch_split = fractal_key_values_list[fractal_layer_idx].batch_split(len(active_slots), 1)
+            if fcache_batch_split[i].get_seq_length() > 0:
+                fcache_batch_split[i].crop((prefix_len_list[i]-1))
+            fractal_key_values_list[fractal_layer_idx] = fractal_key_values_list[fractal_layer_idx].from_batch_splits(fcache_batch_split)    
+            
+    past_key_values = past_key_values.from_batch_splits(cache_batch_split)
+    
+    return past_key_values, fractal_key_values_list
         
