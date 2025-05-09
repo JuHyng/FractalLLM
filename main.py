@@ -9,8 +9,8 @@ from transformers import AutoTokenizer, LlamaForCausalLM
 
 from src.args import get_args
 from src.dataset import load_dataset
-from src.model_old import load_model_with_fractal, set_verify_mode, load_quantized_model
-from src.generate_old import ParallelSPGenerator
+from src.model import load_model_with_fractal, set_verify_mode, load_quantized_model
+from src.generate import ParallelSPGenerator
 from src.utils import FlopsCounter
 
 
@@ -52,29 +52,6 @@ def main():
         exp_name = f"{ts}-{args.model_name}-{args.decode_method}-{args.dataset}-max_samples:{args.max_samples}"
 
     wandb.init(project="FractalLLM", name=exp_name, config=args.__dict__)
-    
-    if args.sweep:
-        wandb.define_metric("elapsed", summary="mean")
-    
-        cfg_dict = dict(vars(args))
-        cfg_dict.update(wandb.config)          # sweep 값으로 덮어쓰기
-
-        # (A) 0/1 플래그 → 레이어 인덱스 리스트
-        layer_flags = [cfg_dict.get(f"layer_{i}", 0) for i in range(16)]
-        layer_idxs  = [i for i, f in enumerate(layer_flags) if int(f) == 1]
-
-        # (B) 8개 초과면 무작위로 8개만 유지
-        max_select = 7
-        if len(layer_idxs) > max_select:
-            layer_idxs = random.sample(layer_idxs, max_select)
-
-        # (C) args.draft_layer_indexes 갱신
-        cfg_dict["draft_layer_indexes"] = layer_idxs
-        setattr(args, "draft_layer_indexes", layer_idxs)   # ← ❶ 추가
-
-        print(f"[Sweep] draft_layer_indexes → {args.draft_layer_indexes}")
-        wandb.config.update(cfg_dict, allow_val_change=True)
-        setattr(args, "draft_layer_indexes", layer_idxs)
 
     # 데이터 및 토크나이저 준비
     data_iter, max_length = load_dataset(args)
@@ -135,6 +112,9 @@ def main():
                     logits = model(generated, use_cache=args.use_cache).logits[:, -1, :]
                     next_id = torch.argmax(logits, dim=-1, keepdim=True)
                     generated = torch.cat([generated, next_id], dim=-1)
+                    
+                    if next_id.item() == tokenizer.eos_token_id:
+                        break
             elapsed = time.time() - t0
 
             flops = flops_counter.get_total_flops()
@@ -175,6 +155,7 @@ def main():
                 "draft_time": 0.0,
                 "verify_time": 0.0,
                 "accept_ratio": 0.0,
+                
             }
             
             flops_counter_t.reset()
@@ -196,10 +177,14 @@ def main():
                     for i in range(args.draft_len):
                         if total_generated_tokens + i >= max_length:
                             break
+                        
                         draft_logits = draft_model(draft_seq, use_cache=args.use_cache).logits[:, -1, :]
                         next_id = torch.argmax(draft_logits, dim=-1, keepdim=True)
                         draft_seq = torch.cat([draft_seq, next_id], dim=-1)
                         performance_dict["model_forward_count"]["draft"] += 1
+                        
+                        if next_id.item() == tokenizer.eos_token_id:
+                            break
                         
                     t_draft = time.time() - t_draft_start
                     performance_dict["draft_time"] += t_draft
@@ -249,17 +234,11 @@ def main():
                             generated = torch.cat([generated, corrected_token], dim=-1)
                             total_generated_tokens += 1
                         
-                        # DEBUG
-                        # print("total_generated_tokens:", total_generated_tokens)
-                        # print("new_tokens:", generated.size(1) - prompt_len)
-
                     # Check if generation finished after this draft/verify cycle
                     if total_generated_tokens >= max_length:
                         break
 
-                    ### REMOVE DEBUG input()
                     text_out = tokenizer.decode(generated[0], skip_special_tokens=True)
-                    # print(f"[{idx}] Intermediate Generated >>> {text_out}")
                     
             accept_ratio = accept_count / total_checks if total_checks > 0 else 0.0
             elapsed = time.time() - t0
@@ -299,13 +278,9 @@ def main():
                 "draft_time": 0.0,
                 "verify_time": 0.0,
                 "accept_ratio": 0.0,
-                "total_accept_count":   0,
-                "total_checked_count":  0,
-
-                # ─── 드래프트별 기록 ───
-                "draft_accept_counts":  [],   
-                "draft_checked_counts": [],   
-                "draft_accept_ratios":  [],    # (optional) 비율
+                "elapsed": 0.0,         # ⏱️ 누적 시간
+                "tokens_per_sec": 0.0,  # ⏱️ 토큰/초 (계산용)
+                
             }
             
             gen = ParallelSPGenerator(
@@ -326,6 +301,7 @@ def main():
             elapsed = time.time() - t0
             flops = flops_counter.get_total_flops()
             new_tokens = performance_dict["new_tokens"]
+            token_per_sec = new_tokens / elapsed if elapsed > 0 else 0.0
 
             perf_spec["times"].append(elapsed)
             perf_spec["flops"].append(flops)
@@ -336,6 +312,7 @@ def main():
                 "elapsed":    elapsed,
                 "flops":      flops,
                 "new_tokens": new_tokens,
+                "token_per_sec": token_per_sec,
                 **performance_dict,
             }
             wandb.log(log_data)
@@ -345,6 +322,7 @@ def main():
             "fractal/avg_time":    sum(perf_spec["times"]) / len(perf_spec["times"]),
             "fractal/total_flops": perf_spec["flops"],
             "fractal/total_tokens": perf_spec["tokens"],
+            "fractal/avg_token_per_sec": sum(perf_spec["tokens"]) / sum(perf_spec["times"])
             **{f"model_fw_count/{k}": v for k, v in performance_dict["model_forward_count"].items()},
             "draft_time_total":   performance_dict["draft_time"],
             "verify_time_total":  performance_dict["verify_time"],

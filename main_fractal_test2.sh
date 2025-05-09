@@ -2,7 +2,7 @@ wandb offline
 
 for dataset in gsm8k
 do
-python main2.py \
+python main.py \
     --model_name meta-llama/Llama-3.2-1B \
     --draft_token "[DRAFT{i}]" \
     --decode_method fractal \
@@ -15,6 +15,6 @@ python main2.py \
     --max_samples 100 \
     --num_beams 1 \
     --n_fewshot 0 \
-    --use_cache True \
+    --use_cache False \
     --print_draft True
 done

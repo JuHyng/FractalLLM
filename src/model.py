@@ -498,12 +498,15 @@ class FractalModule(torch.nn.Module):
                 position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, draft_len=0,
                 prefix_len_list: Optional[List[int]] = None,):
         
-        if cache_position is None:
-                    past_seen_tokens = fractal_key_value.get_seq_length() if fractal_key_value is not None else 0
-                    cache_position = torch.arange(
-                        past_seen_tokens, past_seen_tokens + hidden_states.shape[1], device=hidden_states.device
-                    )
-                    
+        # if cache_position is None:
+        #             past_seen_tokens = fractal_key_value.get_seq_length() if fractal_key_value is not None else 0
+        #             cache_position = torch.arange(
+        #                 past_seen_tokens, past_seen_tokens + hidden_states.shape[1], device=hidden_states.device
+        #             )
+        past_seen_tokens = fractal_key_value.get_seq_length() if fractal_key_value is not None else 0
+        cache_position = torch.arange(
+            past_seen_tokens, past_seen_tokens + hidden_states.shape[1], device=hidden_states.device
+        )
 
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
@@ -511,6 +514,9 @@ class FractalModule(torch.nn.Module):
         if use_cache:
             if fractal_key_value is None:
                 fractal_key_value = FractalCache()
+                
+        if attention_mask is not None:
+            print("[FractalModule] attention_mask.shape", attention_mask.shape)
                 
         causal_mask = self._update_causal_mask(
             attention_mask, hidden_states, cache_position, fractal_key_value, output_attentions) 
@@ -592,9 +598,6 @@ class FractalModule(torch.nn.Module):
         cache_position = torch.arange(
             past_seen_tokens, past_seen_tokens + hidden_states.shape[1], device=hidden_states.device
         )
-        
-        if attention_mask is not None:
-            print("[FractalModule] attention_mask.shape", attention_mask.shape)
         
         causal_mask = self._update_causal_mask(
             None, hidden_states, cache_position, fractal_key_value, output_attentions)
@@ -811,7 +814,7 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
             layer_idx=self.layer_idx,
             input_ids=input_ids,
             hidden_states=hidden_states,
-            attention_mask=attention_mask if attention_mask is not None else None,
+            # attention_mask=attention_mask if attention_mask is not None else None,
             position_ids=position_ids if position_ids is not None else None,
             position_embeddings=(
                 tuple(pos_emb for pos_emb in position_embeddings)
@@ -837,6 +840,7 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
             for batch_idx in range(len(prefix_len_list)):
                 prefix_len = prefix_len_list[batch_idx]
                 if use_cache:
+                    cache_batch_split = past_key_value.batch_split(len(prefix_len_list), 1)
                     fractal_cache_batch_split = fractal_key_value.batch_split(len(prefix_len_list), 1)
                     previous_seq_len.append(fractal_cache_batch_split[batch_idx].get_seq_length())
                     if previous_seq_len[batch_idx] > 0 and previous_seq_len[batch_idx] < prefix_len:
@@ -845,6 +849,8 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
                         
                         # DEBUG
                         print("truncated prefix_len", prefix_len)
+                        cache_batch_split[batch_idx].crop(previous_seq_len[batch_idx])
+                    
                 
                 original_part = hidden_states[batch_idx, :, :]  
                 prefix_part   = original_part[:(prefix_len), :]     
@@ -865,12 +871,12 @@ class FractalLlamaDecoderLayer(torch.nn.Module):
                 
             hidden_states = torch.cat(new_hiddens, dim=0)
             
-        # DEBUG
-        if use_cache:
-            print("[AFTER fractal_module before original Layer] past_key_value.shape", past_key_value.get_seq_length())
-            if not self.is_verify:
-                print("[AFTER fractal_module before original Layer] fractal_key_value.shape", fractal_key_value.get_seq_length())
-            input()
+            # if use_cache:
+            #     past_key_value = past_key_value.from_batch_splits(cache_batch_split)
+            #     print("[AFTER fractal_module before original Layer] past_key_value.shape", past_key_value.get_seq_length())
+            #     if not self.is_verify:
+            #         print("[AFTER fractal_module before original Layer] fractal_key_value.shape", fractal_key_value.get_seq_length())
+            #     input()
             
         print("[FractalLlamaDecoderLayer] before original Layer hidden_states.shape", hidden_states.shape)
 

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import time
+import wandb
 from typing import List, Dict
 from .model import FractalLlamaForCausalLM
 from transformers.cache_utils import DynamicCache, Cache
@@ -102,7 +103,6 @@ def draft_forward(
 ):
     draft_mode_func(model, is_verify=False)
     
-    performance_dict["model_forward_count"]["draft"] += 1
     
     if args.use_cache and past_key_values is not None:
         cache_batch_split = past_key_values.batch_split(len(prefix_len_list), 1)
@@ -131,12 +131,13 @@ def draft_forward(
             past_seen_tokens + seq_len_new, 
             device=batch_input_ids.device
         )
-        
+    
+    eos_token_id = tokenizer.eos_token_id    
 
     with torch.no_grad():
         outputs = model.forward(
             input_ids=batch_input_ids,
-            # attention_mask=batch_attention_mask,
+            attention_mask=batch_attention_mask,
             use_cache=args.use_cache,
             past_key_values=past_key_values if args.use_cache else None,
             fractal_key_values_list=fractal_key_values_list if args.use_cache else None,
@@ -149,32 +150,19 @@ def draft_forward(
     for batch_idx in range(len(prefix_len_list)):
         prefix_len = prefix_len_list[batch_idx]
         
-        if args.use_cache:
-            fractal_key_value = fractal_key_values_list[0]
-            fractal_key_len = fractal_key_value.get_seq_length()
-            if fractal_key_len > 0 and fractal_key_len < prefix_len:
-                prefix_len = prefix_len - fractal_key_len
-                print("[draft forward] truncated prefix_len:", prefix_len)
-        
         slots[batch_idx]["input_ids"] = slots[batch_idx]["input_ids"] [:, :prefix_len]
-
+        
         for i in range(prefix_len, prefix_len + (slots[batch_idx]["final_draft_len"]*2)+1):
             token_logits = logits[batch_idx, i-1, :]
             token_prob = token_logits
             token_pred = torch.argmax(token_prob).item()
-            if token_pred == tokenizer.eos_token_id:
-                slots[batch_idx]["input_ids"] = torch.cat(
-                    [slots[batch_idx]["input_ids"],
-                    torch.tensor([[token_pred]],
-                                device=slots[batch_idx]["input_ids"].device)],  # ← 이렇게
-                    dim=-1,
-                )
-                slots[batch_idx]["hit_eos"] = True      # ★ 기록
-                slots[batch_idx]["final_draft_len"] = i - prefix_len
+            
+            if token_pred == eos_token_id:
+                print(f"[Draft] EOS token encountered. Stopping draft for slot {batch_idx}.")
                 slots[batch_idx]["continue_draft"] = False
-                
                 break
-            slots[batch_idx]["input_ids"] = torch.cat([slots[batch_idx]["input_ids"], torch.tensor([[token_pred]], device=slots[batch_idx]["input_ids"].device)], dim=-1)   
+            
+            slots[batch_idx]["input_ids"] = torch.cat([slots[batch_idx]["input_ids"], torch.tensor([[token_pred]], device=slots[batch_idx]["input_ids"].device)], dim=-1)    
             
     draft_time = time.time() - start_t
     performance_dict["draft_time"] += draft_time        
@@ -189,8 +177,8 @@ def verify_forward(
     draft_mode_func,
     prefix_len_list: List[int],
     performance_dict: dict,
-    past_key_values:Optional[Cache]=None,
-    max_length:Optional[int]=None,
+    past_key_values: Optional[Cache] = None,
+    max_length: Optional[int] = None,
 ):
     draft_mode_func(model, is_verify=True)
     
@@ -199,54 +187,43 @@ def verify_forward(
     active_idx = [i for i, s in enumerate(slots) if s["continue_draft"]]
     if not active_idx:
         return slots, None, 0
-    performance_dict["model_forward_count"]["verify"] += 1
     
     if args.use_cache and past_key_values is not None:
         cache_batch_split = past_key_values.batch_split(len(prefix_len_list), 1)
         leftover_len_list = [cbs.get_seq_length() for cbs in cache_batch_split]
     else:
-        leftover_len_list = [0]*len(prefix_len_list)
+        leftover_len_list = [0] * len(prefix_len_list)
         
     slots = [slots[i] for i in active_idx]
-    slots = [s for s in slots
-            if s["continue_draft"] and not s.get("hit_eos", False)]
 
     if len(slots) == 0:
-        return slots, None, 0 
+        return slots, None, 0
 
     batch_input_ids, batch_attention_mask, slot_map, max_len = pad_and_combine_slots(
         slots,
         pad_token_id=tokenizer.pad_token_id,
         leftover_len_list=leftover_len_list
     )
-    target_device = next(model.parameters()).device
-    batch_input_ids      = batch_input_ids.to(target_device, non_blocking=True)
+    target_device = next(model.parameters()).device  # ex) cuda:2
+    batch_input_ids = batch_input_ids.to(target_device, non_blocking=True)
     batch_attention_mask = batch_attention_mask.to(target_device, non_blocking=True)
     
-    # DEBUG
-    print("[Before Verify] attention_mask.shape:", batch_attention_mask.shape)
-    print("[Before Verify] attention_mask:", batch_attention_mask)
+    eos_token_id = tokenizer.eos_token_id  # EOS token ID
     
     if args.use_cache:
         past_seen_tokens = past_key_values.get_seq_length()
         seq_len_new = batch_input_ids.size(1)     
-        
-        print("[Draft] past_seen_tokens:", past_seen_tokens)
-        print("[Draft] seq_len_new:", seq_len_new)
         
         cache_position = torch.arange(
             past_seen_tokens, 
             past_seen_tokens + seq_len_new, 
             device=batch_input_ids.device
         )
-        print("[Draft] cache_position:", cache_position)
         
-        
-    
     with torch.no_grad():
         outputs = model.forward(
             input_ids=batch_input_ids,
-            # attention_mask=batch_attention_mask,
+            attention_mask=batch_attention_mask,
             use_cache=args.use_cache,
             past_key_values=past_key_values if args.use_cache else None,
             cache_position=cache_position if args.use_cache else None,
@@ -254,93 +231,95 @@ def verify_forward(
         
     logits = outputs.logits
     
-    draft_accept_cnt  = 0          # 이번 드래프트 전체에서 맞힌 토큰 수
-    draft_checked_cnt = 0          # 이번 드래프트 전체 비교 토큰 수
-
-    for i, slot_data in enumerate(slots):
+    correct_predictions_per_draft = []  # 각 드래프트별 정확한 예측 수
+    total_predictions_per_draft = []   # 각 드래프트별 총 예측 수
+    
+    draft_performance_logs = []  # 각 드래프트의 성능 로그를 저장할 리스트
+    
+    for i, slot_data in enumerate(slots):        
         verified_count = 0
-        total_checked  = slot_data["final_draft_len"] * 2
-        fail_draft     = False
+        total_checked = (slot_data["final_draft_len"] * 2)
+        fail_draft = False
         first_fail_label = None
 
-        for pos in range(total_checked):
-            pos += slot_data["current_input_ids"].shape[1] - total_checked - 1
-            token_logits   = logits[i, pos - 1, :]
+        for pos in range((slot_data["final_draft_len"] * 2)):
+            pos = pos + slot_data["current_input_ids"].shape[1] - (slot_data["final_draft_len"] * 2) - 1
+            token_logits = logits[i, pos - 1, :]
             verify_pred_id = torch.argmax(token_logits).item()
-            curr_id        = slot_data["current_input_ids"][0, pos].item()
+            curr_id = slot_data["current_input_ids"][0, pos].item()
 
-            if args.print_draft:
-                pred_str  = tokenizer.decode(verify_pred_id)
-                curr_str  = tokenizer.decode(curr_id)
-
-            if verify_pred_id == curr_id:
-                verified_count += 1
-                if args.print_draft:
-                    print(f"[Verify] MATCH   slot={i} pos={pos}: {pred_str}")
-            else:
-                fail_draft = True
-                first_fail_label = verify_pred_id
-                if args.print_draft:
-                    print(f"[Verify] MISMATCH slot={i} pos={pos}: pred={pred_str} curr={curr_str}")
+            if verify_pred_id == eos_token_id:
+                print(f"[Verify] EOS token encountered at position {pos}. Stopping verification.")
+                slot_data["continue_draft"] = False
                 break
 
-        # 슬롯별 accept 비율 (원하면 유지)
-        slot_data["accept_ratio"] = verified_count / total_checked if total_checked else 0.0
+            # 정확한 예측 여부 확인
+            total_predictions_per_draft.append(1)  # 예측이 일어났으므로 +1
+            if verify_pred_id == curr_id:
+                correct_predictions_per_draft.append(1)
+                if args.print_draft:
+                    print(f"[Verify] MATCH: slot {i} at position {pos}")
+                verified_count += 1
+            else:
+                if args.print_draft:
+                    print(f"[Verify] MISMATCH: slot {i} position {pos}")
+                
+                fail_draft = True
+                first_fail_label = verify_pred_id
+                break
 
-        # 드래프트 합계 누적
-        draft_accept_cnt  += verified_count
-        draft_checked_cnt += total_checked
-
-        # ─── 기존 mismatch 처리 로직은 그대로 ───
-        if fail_draft and first_fail_label is not None:
-            pre_ids = slot_data["input_ids"][:, :-((slot_data["final_draft_len"]*2)+1 - verified_count)]
-            label_tensor = torch.tensor([[first_fail_label]], device=pre_ids.device, dtype=pre_ids.dtype)
-            slot_data["input_ids"] = torch.cat([pre_ids, label_tensor], dim=-1)
-            slot_data["total_new_tokens"] += (verified_count + 1)
-            slot_data["continue_draft"] = True
-            performance_dict["new_tokens"] += (verified_count + 1)
+        # 각 드래프트에서의 정확한 예측 비율 계산
+        if len(total_predictions_per_draft) > 0:
+            accept_ratio_per_draft = sum(correct_predictions_per_draft) / sum(total_predictions_per_draft)
         else:
-            slot_data["continue_draft"] = True
+            accept_ratio_per_draft = 0.0
+        
+        # 드래프트 성능 기록
+        draft_performance_logs.append({
+            "draft_idx": i,
+            "accept_ratio": accept_ratio_per_draft,
+            "correct_predictions": sum(correct_predictions_per_draft),
+            "total_predictions": sum(total_predictions_per_draft)
+        })
+        
+        slot_data["accept_ratio"] = accept_ratio_per_draft
+
+        # 평균 accept_ratio 계산
+        avg_accept_ratio = sum(correct_predictions_per_draft) / sum(total_predictions_per_draft) if total_predictions_per_draft else 0.0
+        performance_dict["avg_accept_ratio"] = avg_accept_ratio
+
+        if fail_draft and first_fail_label is not None:
+            pre_ids = slot_data["input_ids"][:, :-((slot_data["final_draft_len"] * 2) + 1 - verified_count)]
+            label_tensor = torch.tensor([[first_fail_label]], 
+                                device=pre_ids.device, dtype=pre_ids.dtype)
+            slot_data["input_ids"] = torch.cat([pre_ids, label_tensor], dim=-1)
+            slot_data["total_new_tokens"] += (verified_count + 1)  # +1: mismatch token
+            slot_data["continue_draft"] = True 
+            performance_dict["new_tokens"] += (verified_count + 1)
+            
+        else:
+            slot_data["continue_draft"] = True  
             slot_data["total_new_tokens"] += verified_count
             performance_dict["new_tokens"] += verified_count
-
+            
         if slot_data["total_new_tokens"] >= max_length:
             slot_data["continue_draft"] = False
-
-    # ──────────────────────────────────────────────────────────
-    # 드래프트-사이클 통계 갱신
-    if draft_checked_cnt:                                     # 0 division guard
-        draft_accept_ratio = draft_accept_cnt / draft_checked_cnt
-    else:
-        draft_accept_ratio = 0.0
-
-    # 드래프트별 리스트 기록
-    performance_dict.setdefault("draft_accept_counts",  []).append(draft_accept_cnt)
-    performance_dict.setdefault("draft_checked_counts", []).append(draft_checked_cnt)
-    performance_dict.setdefault("draft_accept_ratios",  []).append(draft_accept_ratio)
-
-    # 문제(샘플) 전체 누적
-    performance_dict["total_accept_count"]  = performance_dict.get("total_accept_count", 0)  + draft_accept_cnt
-    performance_dict["total_checked_count"] = performance_dict.get("total_checked_count", 0) + draft_checked_cnt
-
-    # 전체 평균(실시간 업데이트용)
-    if performance_dict["total_checked_count"]:
-        performance_dict["accept_ratio"] = (
-            performance_dict["total_accept_count"] /
-            performance_dict["total_checked_count"]
-        )
-
-    # 드래프트별 속성 로그 (원한다면 여기서 바로 wandb.log 가능)
-    if args.print_draft:
-        print(f"[Verify] draft_accept_cnt={draft_accept_cnt}  "
-              f"checked={draft_checked_cnt}  "
-              f"ratio={draft_accept_ratio:.3f}")
-
+            
     verify_time = time.time() - start_t
     performance_dict["verify_time"] += verify_time
 
-    # 반환값: 기존 세 번째 값은 드래프트 전체 맞힌 개수로 변경
-    return slots, outputs, draft_accept_cnt
+    # 각 드래프트의 성능 로그를 `wandb`에 로깅
+    for log in draft_performance_logs:
+        wandb.log({
+            f"draft_{log['draft_idx']}_accept_ratio": log["accept_ratio"],
+            f"draft_{log['draft_idx']}_correct_predictions": log["correct_predictions"],
+            f"draft_{log['draft_idx']}_total_predictions": log["total_predictions"],
+        })
+
+    return slots, outputs, verified_count
+
+
+
         
 
 class ParallelSPGenerator(nn.Module):
@@ -377,7 +356,6 @@ class ParallelSPGenerator(nn.Module):
             "current_input_ids":None, # for use_cache=True
             "continue_draft": True,
             "active": False,
-            "hit_eos": False,
             "draft_iteration": 0,
             "total_new_tokens": 0
         }
@@ -415,7 +393,7 @@ class ParallelSPGenerator(nn.Module):
             
         draft_ids = self.tokenizer.convert_tokens_to_ids(self.draft_tokens)
         
-        accepted_prefix_len = []
+        
         while not done:
             active_slots = [s for s in self.slots if s["active"]]
             if len(active_slots) == 0:
@@ -450,10 +428,9 @@ class ParallelSPGenerator(nn.Module):
                 if past_key_values.get_seq_length() > 0:
                     cache_batch_split = past_key_values.batch_split(len(active_slots), 1)
                     for i in range(len(cache_batch_split)):
-                        cache_len = cache_batch_split[i].get_seq_length()
-                        # if cache_len > 0:
-                            # active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"][:, -(self.args.draft_len+1):] # 1(last token of prefix) + draft_tokens (draft_len+1)
-                        active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"][:, (cache_len):]
+                        if cache_batch_split[i].get_seq_length() > 0:
+                            active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"][:, -(self.args.draft_len+1):] # 1(last token of prefix) + draft_tokens (draft_len+1)
+                            
 
             if cache_batch_split is None:
                 for i in range(len(active_slots)):
@@ -478,6 +455,9 @@ class ParallelSPGenerator(nn.Module):
                 past_key_values=past_key_values,
                 fractal_key_values_list=fractal_key_values_list,
             )
+            self.performance_dict["model_forward_count"]["draft"] += 1
+            
+            
             
             if self.args.use_cache:
                 past_key_values = _draft_out.past_key_values
@@ -487,22 +467,20 @@ class ParallelSPGenerator(nn.Module):
                 if self.args.print_draft:
                     print("[After Draft] input_ids:", self.tokenizer.decode(active_slots[i]["input_ids"][0]))
                     print("[After Draft] input_ids.shape:", active_slots[i]["input_ids"].shape)
-                    
-                    # DEBUG layer index마다 past_key_values 출력
-                    for i in range(len(self.model.model.layers)):
-                        print(f"[After Draft] past_key_values.get_seq_length({i})", past_key_values.get_seq_length(i))
-                        print(f"[After Draft] fractal_key_values_list[0].get_seq_length{i})", fractal_key_values_list[0].get_seq_length(i))
-                
-                    # DEBUG
-                    print("prefix_len_list:", prefix_len_list)
+                    print("[After Draft] past_key_values.get_seq_length()", past_key_values.get_seq_length())
+                    print("[After Draft] fractal_key_values_list[0].get_seq_length()", fractal_key_values_list[0].get_seq_length())
                 
                 if past_key_values.get_seq_length() > 0:
-                    past_key_values, fractal_key_values_list = crop_all_cache(
-                        past_key_values=past_key_values,
-                        fractal_key_values_list=fractal_key_values_list,
-                        prefix_len_list=prefix_len_list,
-                        active_slots=active_slots
-                    )
+                    cache_batch_split = past_key_values.batch_split(len(active_slots), 1)
+                    for i in range(len(cache_batch_split)):
+                        if cache_batch_split[i].get_seq_length() > 0:
+                            active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"][:, -(1+self.args.draft_len*2+1):]
+                            cache_batch_split[i].crop(-(1+self.args.draft_len+1))
+                            print("[After Draft] current_input_ids:", active_slots[i]["current_input_ids"])
+                            print("[After Draft] current_input_ids deode:", self.tokenizer.decode(active_slots[i]["current_input_ids"][0]))
+                            print("[After Draft] current_input_ids.shape:", active_slots[i]["current_input_ids"].shape)
+                        else:
+                            active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"]
                     
             else:
                 for i in range(len(active_slots)):
@@ -510,13 +488,6 @@ class ParallelSPGenerator(nn.Module):
             
             if self.args.print_draft:
                 print("[After Draft] decoded text:", self.tokenizer.decode(active_slots[0]["input_ids"][0]))
-                
-            # DEBUG
-            if self.args.use_cache:
-                # DEBUG layer index마다 past_key_values 출력
-                for i in range(len(self.model.model.layers)):
-                    print(f"[After Draft after crop] past_key_values.get_seq_length({i})", past_key_values.get_seq_length(i))
-                    print(f"[After Draft after crop] fractal_key_values_list[0].get_seq_length{i})", fractal_key_values_list[0].get_seq_length(i))
 
             active_slots, _verify_out, verified_count = verify_forward(
                 slots=active_slots,
@@ -529,18 +500,11 @@ class ParallelSPGenerator(nn.Module):
                 max_length=self.max_length,
                 past_key_values=past_key_values
             )
+            self.performance_dict["model_forward_count"]["verify"] += 1
             
             if self.args.use_cache:
                 past_key_values = _verify_out.past_key_values
-                
-                cache_batch_split = past_key_values.batch_split(len(active_slots), 1)
-                for i in range(len(cache_batch_split)):
-                    cache_batch_split[i].crop(prefix_len_list[i]-1)
-                past_key_values = past_key_values.from_batch_splits(cache_batch_split)
-                
-                for i in range(len(self.model.model.layers)):
-                    print(f"[After Verify after Crop] past_key_values.get_seq_length({i})", past_key_values.get_seq_length(i))
-                    print(f"[After Verify] fractal_key_values_list[0].get_seq_length{i})", fractal_key_values_list[0].get_seq_length(i))
+                fractal_key_values_list = _verify_out.fractal_key_values_list
 
             for s in active_slots:
                 if not s["continue_draft"]:
@@ -557,31 +521,4 @@ class ParallelSPGenerator(nn.Module):
         input()
         return self.performance_dict
         
-        
-def crop_all_cache(
-    past_key_values:Cache,
-    fractal_key_values_list:List[Cache],
-    prefix_len_list:List[int],
-    active_slots:List[dict],
-):
-    cache_batch_split = past_key_values.batch_split(len(active_slots), 1)
-    for i in range(len(cache_batch_split)):
-        if cache_batch_split[i].get_seq_length() > 0:
-            # active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"][:, -(1+self.args.draft_len*2+1):]
-            active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"][:, prefix_len_list[i]-1:]
-            cache_batch_split[i].crop((prefix_len_list[i]-1))
-            print("[After Draft] current_input_ids:", active_slots[i]["current_input_ids"])
-            print("[After Draft] current_input_ids.shape:", active_slots[i]["current_input_ids"].shape)
-        else:
-            active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"]
-            
-        for fractal_layer_idx in range(len(fractal_key_values_list)):
-            fcache_batch_split = fractal_key_values_list[fractal_layer_idx].batch_split(len(active_slots), 1)
-            if fcache_batch_split[i].get_seq_length() > 0:
-                fcache_batch_split[i].crop((prefix_len_list[i]-1))
-            fractal_key_values_list[fractal_layer_idx] = fractal_key_values_list[fractal_layer_idx].from_batch_splits(fcache_batch_split)    
-            
-    past_key_values = past_key_values.from_batch_splits(cache_batch_split)
-    
-    return past_key_values, fractal_key_values_list
         
