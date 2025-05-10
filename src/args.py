@@ -116,6 +116,11 @@ class DataArguments:
         metadata={"help": "0이면 zero-shot, k>0 few-shot으로 prepend"},
     )
     
+    shuffle_seed: int = field(
+        default=42,
+        metadata={"help": "Random seed for shuffling"},
+    )
+    
 
 @dataclass
 class GenerationArguments:

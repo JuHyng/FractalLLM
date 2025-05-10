@@ -1,8 +1,8 @@
-wandb online
+wandb offline
 
 # export CUDA_VISIBLE_DEVICES=0
 
-for dataset in human_eval
+for dataset in cnn_dm
 do
 python main.py \
     --model_name meta-llama/Llama-3.2-1B \

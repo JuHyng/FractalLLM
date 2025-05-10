@@ -9,8 +9,8 @@ from transformers import AutoTokenizer, LlamaForCausalLM
 
 from src.args import get_args
 from src.dataset import load_dataset
-from src.model_old import load_model_with_fractal, set_verify_mode, load_quantized_model
-from src.generate_old import ParallelSPGenerator
+from src.model import load_model_with_fractal, set_verify_mode, load_quantized_model
+from src.generate import ParallelSPGenerator
 from src.utils import FlopsCounter
 
 
