@@ -51,7 +51,7 @@ def main():
     else:
         exp_name = f"{ts}-{args.model_name}-{args.decode_method}-{args.dataset}-max_samples:{args.max_samples}"
 
-    wandb.init(project="FractalLLM", name=exp_name, config=args.__dict__)
+    wandb.init(project="FractalFinal", name=exp_name, config=args.__dict__)
     
     if args.sweep:
         wandb.define_metric("elapsed", summary="mean")
@@ -79,6 +79,7 @@ def main():
     # 데이터 및 토크나이저 준비
     data_iter, max_length = load_dataset(args)
     data_list = list(data_iter)
+    data_list = data_list[36:]
     tokenizer, draft_tokens = prepare_tokenizer(args)
 
     # 모델 로드

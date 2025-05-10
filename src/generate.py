@@ -240,25 +240,34 @@ def verify_forward(
         verified_count   = 0
         fail_draft       = False
         first_fail_label = None
-        clean_finish     = False        # ← EOS를 맞혀서 끝났는지 표시
+        early_stop = False
+        
+        total_draft_tokens = slot_data["final_draft_len"] * 2
+        seq_len_current    = slot_data["current_input_ids"].shape[1]
 
-        for step in range(slot_data["final_draft_len"] * 2):
-            pos = slot_data["current_input_ids"].shape[1] - (slot_data["final_draft_len"] * 2) - 1 + step
+        for step in range(total_draft_tokens):
+            pos = seq_len_current - total_draft_tokens - 1 + step
+            if pos - 1 < 0 or pos - 1 >= logits.shape[1]:
+                break
             token_logits   = logits[i, pos - 1, :]
             verify_pred_id = torch.argmax(token_logits).item()
             curr_id        = slot_data["current_input_ids"][0, pos].item()
 
             # ───────── MATCH ─────────
             if verify_pred_id == curr_id:
-                verified_count += 1
                 if verify_pred_id == eos_token_id:           # EOS를 맞힌 경우
-                    print(f"[Verify] CLEAN-EOS at pos {pos}")
-                    slot_data["continue_draft"] = False
-                    clean_finish = True
+                    verified_count += 1 #EOS도 맞췄췄으니깐 +1
                     
-                    eos_pos = pos                          # 현 위치가 EOS
-                    slot_data["input_ids"] = slot_data["input_ids"][:, :eos_pos]
+                    eos_pos = pos
+                    slot_data["input_ids"]         = slot_data["input_ids"][:, :eos_pos]
+                    slot_data["current_input_ids"] = slot_data["current_input_ids"][:, :eos_pos]
+                    slot_data["total_new_tokens"]  = eos_pos - slot_data["prompt_len"]
+                    slot_data["continue_draft"] = False
+
+                    early_stop = True
+                    # ⑤ **즉시** 외부 루프 종료
                     break
+                verified_count += 1
                 continue                                     # 다음 토큰 검사
 
             # ───────── MISMATCH ──────
@@ -268,32 +277,34 @@ def verify_forward(
             break                      # loop 탈출
         # ------- loop end -------
 
-        if clean_finish:
-            # 아무 복구도 하지 않고, 토큰 집계만
-            slot_data["total_new_tokens"] += verified_count
-            performance_dict["new_tokens"] += verified_count
-            
-            final_len = slot_data["input_ids"].size(1)
-            slot_data["total_new_tokens"] = final_len - slot_data["prompt_len"]
-            continue                    # 다음 slot 처리
-
+        if early_stop :
+            break
+        
         if fail_draft and first_fail_label is not None:
-            pre_ids      = slot_data["input_ids"][:, :-((slot_data["final_draft_len"]*2) + 1 - verified_count)]
-            label_tensor = torch.tensor([[first_fail_label]], device=pre_ids.device, dtype=pre_ids.dtype)
-            slot_data["input_ids"] = torch.cat([pre_ids, label_tensor], dim=-1)
-            slot_data["total_new_tokens"] += verified_count + 1
-            performance_dict["new_tokens"] += verified_count + 1
-            slot_data["continue_draft"] = True               # 복구 후 다시 드래프트
+            pre_ids      = slot_data["input_ids"][:, :-(total_draft_tokens + 1 - verified_count)]
+            if first_fail_label == eos_token_id:
+                slot_data["input_ids"] = pre_ids           # EOS 이전까지만 보존
+                slot_data["continue_draft"] = False        # 더 이상 draft 안 함
+            else:
+                # ② 일반 토큰이면 기존 복구 로직 유지
+                label_tensor = torch.tensor([[first_fail_label]],
+                                            device=pre_ids.device, dtype=pre_ids.dtype)
+                slot_data["input_ids"] = torch.cat([pre_ids, label_tensor], dim=-1)
+                slot_data["continue_draft"] = True         # 다시 draft            # 복구 후 다시 드래프트
         else:
             # 전부 맞았지만 EOS는 아님 → 계속 드래프트
-            slot_data["total_new_tokens"] += verified_count
-            performance_dict["new_tokens"] += verified_count
             slot_data["continue_draft"] = True
+        slot_data["total_new_tokens"] = (
+            slot_data["input_ids"].size(1) - slot_data["prompt_len"]
+        )
 
         if slot_data["total_new_tokens"] >= max_length:
             slot_data["continue_draft"] = False
+
+        
     verify_time = time.time() - start_t
     performance_dict["verify_time"] += verify_time
+    performance_dict["new_tokens"] = slots[0]["total_new_tokens"]
     
         # 평균 accept_ratio 계산
     ratios = [log["accept_ratio"] for log in draft_performance_logs]
@@ -425,12 +436,6 @@ class ParallelSPGenerator(nn.Module):
                 for i in range(len(active_slots)):
                     active_slots[i]["current_input_ids"] = active_slots[i]["input_ids"]
             
-            # DEBUG
-            if self.args.print_draft:
-                print("[Before Draft] input_ids:", self.tokenizer.decode(active_slots[i]["input_ids"][0]))
-                print("[Before Draft] input_ids.shape:", active_slots[i]["input_ids"].shape)
-                print("[Before Draft] current_input_ids:", active_slots[i]["current_input_ids"])
-                print("[Before Draft] current_input_ids.shape:", active_slots[i]["current_input_ids"].shape)
 
             iteration += 1
             active_slots, _draft_out = draft_forward(

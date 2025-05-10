@@ -4,6 +4,7 @@ from collections import deque
 
 import torch
 import wandb
+import random
 from tqdm import tqdm
 from transformers import AutoTokenizer, LlamaForCausalLM
 
@@ -51,31 +52,30 @@ def main():
     else:
         exp_name = f"{ts}-{args.model_name}-{args.decode_method}-{args.dataset}-max_samples:{args.max_samples}"
 
-    wandb.init(project="FractalLLM", name=exp_name, config=args.__dict__)
+    wandb.init(project="Fractal sweep", name=exp_name, config=args.__dict__)
     
-    if args.sweep:
-        wandb.define_metric("elapsed", summary="mean")
+    
+    wandb.define_metric("elapsed", summary="mean")
+    
+    cfg_dict = dict(vars(args))
+    cfg_dict.update(wandb.config)          # sweep 값으로 덮어쓰기
 
-        cfg_dict = dict(vars(args))
-        cfg_dict.update(wandb.config)      # sweep 값으로 덮어쓰기
+    # (A) 0/1 플래그 → 레이어 인덱스 리스트
+    layer_flags = [cfg_dict.get(f"layer_{i}", 0) for i in range(16)]
+    layer_idxs  = [i for i, f in enumerate(layer_flags) if int(f) == 1]
 
-        # (A) 0/1 플래그 → 선택된 레이어 인덱스 목록 만들기
-        layer_flags = [cfg_dict.get(f"layer_{i}", 0)
-                       for i in range(args.draft_len * 4)]  # 예: draft_len=4면 16플래그
-        layer_idxs = [i for i, flag in enumerate(layer_flags) if int(flag) == 1]
+    # (B) 8개 초과면 무작위로 8개만 유지
+    max_select = 7
+    if len(layer_idxs) > max_select:
+        layer_idxs = random.sample(layer_idxs, max_select)
 
-        # (B) 선택 수가 draft_len 보다 많으면 랜덤으로 잘라내기 ★수정
-        max_select = args.draft_len
-        if len(layer_idxs) > max_select:
-            layer_idxs = random.sample(layer_idxs, max_select)
+    # (C) args.draft_layer_indexes 갱신
+    cfg_dict["draft_layer_indexes"] = layer_idxs
+    setattr(args, "draft_layer_indexes", layer_idxs)   # ← ❶ 추가
 
-        # (C) args.draft_layer_indexes 갱신
-        cfg_dict["draft_layer_indexes"] = layer_idxs
-        setattr(args, "draft_layer_indexes", layer_idxs)
-
-        print(f"[Sweep] draft_layer_indexes → {args.draft_layer_indexes}")
-        wandb.config.update(cfg_dict, allow_val_change=True)
-        setattr(args, "draft_layer_indexes", layer_idxs)
+    print(f"[Sweep] draft_layer_indexes → {args.draft_layer_indexes}")
+    wandb.config.update(cfg_dict, allow_val_change=True)
+    setattr(args, "draft_layer_indexes", layer_idxs)
 
     # 데이터 및 토크나이저 준비
     data_iter, max_length = load_dataset(args)
@@ -97,7 +97,7 @@ def main():
             args.model_name,
             cache_dir=args.cache_dir,
             device_map=args.device_map,
-        )+
+        )
         draft_mode_func = None
     elif args.decode_method == 'draft':
         target_model = LlamaForCausalLM.from_pretrained(
