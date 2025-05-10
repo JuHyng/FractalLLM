@@ -9,9 +9,9 @@ python main.py \
     --draft_token "[DRAFT{i}]" \
     --decode_method fractal \
     --decomp_method quant_8bit \
-    --draft_len 8 \
+    --draft_len 4 \
     --draft_layer_indexes 4 6 8 10\
-    --split test \
+    --split train \
     --output_dir ./ \
     --dataset $dataset \
     --max_samples 100 \

@@ -157,12 +157,15 @@ def load_dataset(args) -> Tuple[List[Tuple[str, str]], int]:
     # ① 데이터 로드
     data = loader_fn(
         split=args.split,
-        max_samples=args.max_samples,
+        max_samples=None,
     )
+    
+    if args.max_samples is not None and args.max_samples < len(data):
+        rng = random.Random(getattr(args, "seed", args.shuffle_seed))
+        data = rng.sample(data, args.max_samples)
 
-    # ② few-shot 예시 부착 (없으면 그대로)
     n_fs   = getattr(args, "n_fewshot", 0)
-    seed   = getattr(args, "seed", 42)
+    seed   = getattr(args, "seed", args.shuffle_seed)
     data   = _attach_fewshot(data, k=n_fs, seed=seed)
 
     return data, max_len

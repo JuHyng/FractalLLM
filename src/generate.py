@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import time
+import wandb
 from typing import List, Dict
 from .model import FractalLlamaForCausalLM
 from transformers.cache_utils import DynamicCache, Cache
@@ -102,7 +103,6 @@ def draft_forward(
 ):
     draft_mode_func(model, is_verify=False)
     
-    performance_dict["model_forward_count"]["draft"] += 1
     
     if args.use_cache and past_key_values is not None:
         cache_batch_split = past_key_values.batch_split(len(prefix_len_list), 1)
@@ -131,7 +131,8 @@ def draft_forward(
             past_seen_tokens + seq_len_new, 
             device=batch_input_ids.device
         )
-        
+    
+    eos_token_id = tokenizer.eos_token_id    
 
     with torch.no_grad():
         outputs = model.forward(
@@ -155,19 +156,13 @@ def draft_forward(
             token_logits = logits[batch_idx, i-1, :]
             token_prob = token_logits
             token_pred = torch.argmax(token_prob).item()
-            if token_pred == tokenizer.eos_token_id:
-                slots[batch_idx]["input_ids"] = torch.cat(
-                    [slots[batch_idx]["input_ids"],
-                    torch.tensor([[token_pred]],
-                                device=slots[batch_idx]["input_ids"].device)],  # ← 이렇게
-                    dim=-1,
-                )
-                slots[batch_idx]["hit_eos"] = True      # ★ 기록
-                slots[batch_idx]["final_draft_len"] = i - prefix_len
-                slots[batch_idx]["continue_draft"] = False
-                
-                break
-            slots[batch_idx]["input_ids"] = torch.cat([slots[batch_idx]["input_ids"], torch.tensor([[token_pred]], device=slots[batch_idx]["input_ids"].device)], dim=-1)   
+            
+            # if token_pred == eos_token_id:
+            #     print(f"[Draft] EOS token encountered. Stopping draft for slot {batch_idx}.")
+            #     slots[batch_idx]["continue_draft"] = False
+            #     break
+            
+            slots[batch_idx]["input_ids"] = torch.cat([slots[batch_idx]["input_ids"], torch.tensor([[token_pred]], device=slots[batch_idx]["input_ids"].device)], dim=-1)    
             
     draft_time = time.time() - start_t
     performance_dict["draft_time"] += draft_time        
@@ -182,8 +177,8 @@ def verify_forward(
     draft_mode_func,
     prefix_len_list: List[int],
     performance_dict: dict,
-    past_key_values:Optional[Cache]=None,
-    max_length:Optional[int]=None,
+    past_key_values: Optional[Cache] = None,
+    max_length: Optional[int] = None,
 ):
     draft_mode_func(model, is_verify=True)
     
@@ -192,46 +187,39 @@ def verify_forward(
     active_idx = [i for i, s in enumerate(slots) if s["continue_draft"]]
     if not active_idx:
         return slots, None, 0
-    performance_dict["model_forward_count"]["verify"] += 1
     
     if args.use_cache and past_key_values is not None:
         cache_batch_split = past_key_values.batch_split(len(prefix_len_list), 1)
         leftover_len_list = [cbs.get_seq_length() for cbs in cache_batch_split]
     else:
-        leftover_len_list = [0]*len(prefix_len_list)
+        leftover_len_list = [0] * len(prefix_len_list)
         
     slots = [slots[i] for i in active_idx]
-    slots = [s for s in slots
-            if s["continue_draft"] and not s.get("hit_eos", False)]
 
     if len(slots) == 0:
-        return slots, None, 0 
+        return slots, None, 0
 
     batch_input_ids, batch_attention_mask, slot_map, max_len = pad_and_combine_slots(
         slots,
         pad_token_id=tokenizer.pad_token_id,
         leftover_len_list=leftover_len_list
     )
-    target_device = next(model.parameters()).device      # ex) cuda:2
-    batch_input_ids      = batch_input_ids.to(target_device, non_blocking=True)
+    target_device = next(model.parameters()).device  # ex) cuda:2
+    batch_input_ids = batch_input_ids.to(target_device, non_blocking=True)
     batch_attention_mask = batch_attention_mask.to(target_device, non_blocking=True)
+    
+    eos_token_id = tokenizer.eos_token_id  # EOS token ID
     
     if args.use_cache:
         past_seen_tokens = past_key_values.get_seq_length()
         seq_len_new = batch_input_ids.size(1)     
-        
-        print("[Draft] past_seen_tokens:", past_seen_tokens)
-        print("[Draft] seq_len_new:", seq_len_new)
         
         cache_position = torch.arange(
             past_seen_tokens, 
             past_seen_tokens + seq_len_new, 
             device=batch_input_ids.device
         )
-        print("[Draft] cache_position:", cache_position)
         
-        
-    
     with torch.no_grad():
         outputs = model.forward(
             input_ids=batch_input_ids,
@@ -243,93 +231,86 @@ def verify_forward(
         
     logits = outputs.logits
     
-    draft_accept_cnt  = 0          # 이번 드래프트 전체에서 맞힌 토큰 수
-    draft_checked_cnt = 0          # 이번 드래프트 전체 비교 토큰 수
-
+    correct_predictions_per_draft = []  # 각 드래프트별 정확한 예측 수
+    total_predictions_per_draft = []   # 각 드래프트별 총 예측 수
+    
+    draft_performance_logs = []  # 각 드래프트의 성능 로그를 저장할 리스트
+    
     for i, slot_data in enumerate(slots):
-        verified_count = 0
-        total_checked  = slot_data["final_draft_len"] * 2
-        fail_draft     = False
+        verified_count   = 0
+        fail_draft       = False
         first_fail_label = None
+        clean_finish     = False        # ← EOS를 맞혀서 끝났는지 표시
 
-        for pos in range(total_checked):
-            pos += slot_data["current_input_ids"].shape[1] - total_checked - 1
-            token_logits   = logits[i, pos, :]
+        for step in range(slot_data["final_draft_len"] * 2):
+            pos = slot_data["current_input_ids"].shape[1] - (slot_data["final_draft_len"] * 2) - 1 + step
+            token_logits   = logits[i, pos - 1, :]
             verify_pred_id = torch.argmax(token_logits).item()
-            curr_id        = slot_data["current_input_ids"][0, pos + 1].item()
+            curr_id        = slot_data["current_input_ids"][0, pos].item()
 
-            if args.print_draft:
-                pred_str  = tokenizer.decode(verify_pred_id)
-                curr_str  = tokenizer.decode(curr_id)
-
+            # ───────── MATCH ─────────
             if verify_pred_id == curr_id:
                 verified_count += 1
-                if args.print_draft:
-                    print(f"[Verify] MATCH   slot={i} pos={pos}: {pred_str}")
-            else:
-                fail_draft = True
-                first_fail_label = verify_pred_id
-                if args.print_draft:
-                    print(f"[Verify] MISMATCH slot={i} pos={pos}: pred={pred_str} curr={curr_str}")
-                break
+                if verify_pred_id == eos_token_id:           # EOS를 맞힌 경우
+                    print(f"[Verify] CLEAN-EOS at pos {pos}")
+                    slot_data["continue_draft"] = False
+                    clean_finish = True
+                    
+                    eos_pos = pos                          # 현 위치가 EOS
+                    slot_data["input_ids"] = slot_data["input_ids"][:, :eos_pos]
+                    break
+                continue                                     # 다음 토큰 검사
 
-        # 슬롯별 accept 비율 (원하면 유지)
-        slot_data["accept_ratio"] = verified_count / total_checked if total_checked else 0.0
+            # ───────── MISMATCH ──────
+            #print(f"[Verify] MISMATCH: slot {i} pos {pos}")
+            fail_draft       = True
+            first_fail_label = verify_pred_id
+            break                      # loop 탈출
+        # ------- loop end -------
 
-        # 드래프트 합계 누적
-        draft_accept_cnt  += verified_count
-        draft_checked_cnt += total_checked
-
-        # ─── 기존 mismatch 처리 로직은 그대로 ───
-        if fail_draft and first_fail_label is not None:
-            pre_ids = slot_data["input_ids"][:, :-((slot_data["final_draft_len"]*2)+1 - verified_count)]
-            label_tensor = torch.tensor([[first_fail_label]], device=pre_ids.device, dtype=pre_ids.dtype)
-            slot_data["input_ids"] = torch.cat([pre_ids, label_tensor], dim=-1)
-            slot_data["total_new_tokens"] += (verified_count + 1)
-            slot_data["continue_draft"] = True
-            performance_dict["new_tokens"] += (verified_count + 1)
-        else:
-            slot_data["continue_draft"] = True
+        if clean_finish:
+            # 아무 복구도 하지 않고, 토큰 집계만
             slot_data["total_new_tokens"] += verified_count
             performance_dict["new_tokens"] += verified_count
+            
+            final_len = slot_data["input_ids"].size(1)
+            slot_data["total_new_tokens"] = final_len - slot_data["prompt_len"]
+            continue                    # 다음 slot 처리
+
+        if fail_draft and first_fail_label is not None:
+            pre_ids      = slot_data["input_ids"][:, :-((slot_data["final_draft_len"]*2) + 1 - verified_count)]
+            label_tensor = torch.tensor([[first_fail_label]], device=pre_ids.device, dtype=pre_ids.dtype)
+            slot_data["input_ids"] = torch.cat([pre_ids, label_tensor], dim=-1)
+            slot_data["total_new_tokens"] += verified_count + 1
+            performance_dict["new_tokens"] += verified_count + 1
+            slot_data["continue_draft"] = True               # 복구 후 다시 드래프트
+        else:
+            # 전부 맞았지만 EOS는 아님 → 계속 드래프트
+            slot_data["total_new_tokens"] += verified_count
+            performance_dict["new_tokens"] += verified_count
+            slot_data["continue_draft"] = True
 
         if slot_data["total_new_tokens"] >= max_length:
             slot_data["continue_draft"] = False
-
-    # ──────────────────────────────────────────────────────────
-    # 드래프트-사이클 통계 갱신
-    if draft_checked_cnt:                                     # 0 division guard
-        draft_accept_ratio = draft_accept_cnt / draft_checked_cnt
-    else:
-        draft_accept_ratio = 0.0
-
-    # 드래프트별 리스트 기록
-    performance_dict.setdefault("draft_accept_counts",  []).append(draft_accept_cnt)
-    performance_dict.setdefault("draft_checked_counts", []).append(draft_checked_cnt)
-    performance_dict.setdefault("draft_accept_ratios",  []).append(draft_accept_ratio)
-
-    # 문제(샘플) 전체 누적
-    performance_dict["total_accept_count"]  = performance_dict.get("total_accept_count", 0)  + draft_accept_cnt
-    performance_dict["total_checked_count"] = performance_dict.get("total_checked_count", 0) + draft_checked_cnt
-
-    # 전체 평균(실시간 업데이트용)
-    if performance_dict["total_checked_count"]:
-        performance_dict["accept_ratio"] = (
-            performance_dict["total_accept_count"] /
-            performance_dict["total_checked_count"]
-        )
-
-    # 드래프트별 속성 로그 (원한다면 여기서 바로 wandb.log 가능)
-    if args.print_draft:
-        print(f"[Verify] draft_accept_cnt={draft_accept_cnt}  "
-              f"checked={draft_checked_cnt}  "
-              f"ratio={draft_accept_ratio:.3f}")
-
     verify_time = time.time() - start_t
     performance_dict["verify_time"] += verify_time
+    
+        # 평균 accept_ratio 계산
+    ratios = [log["accept_ratio"] for log in draft_performance_logs]
+    performance_dict["avg_accept_ratio"] = sum(ratios) / len(ratios) if ratios else 0.0
 
-    # 반환값: 기존 세 번째 값은 드래프트 전체 맞힌 개수로 변경
-    return slots, outputs, draft_accept_cnt
+    # # 각 드래프트의 성능 로그를 wandb에 로깅
+    # for log in draft_performance_logs:
+    #     wandb.log({
+    #         f"draft_{log['draft_idx']}_accept_ratio": log["accept_ratio"],
+    #         f"draft_{log['draft_idx']}_correct_predictions": log["correct_predictions"],
+    #         f"draft_{log['draft_idx']}_total_predictions": log["total_predictions"],
+    #     })
+
+    return slots, outputs, verified_count
+
+
+
         
 
 class ParallelSPGenerator(nn.Module):
@@ -366,7 +347,6 @@ class ParallelSPGenerator(nn.Module):
             "current_input_ids":None, # for use_cache=True
             "continue_draft": True,
             "active": False,
-            "hit_eos": False,
             "draft_iteration": 0,
             "total_new_tokens": 0
         }
@@ -422,9 +402,7 @@ class ParallelSPGenerator(nn.Module):
                 if remaining <= 0:                     
                     slot["continue_draft"] = False
                     continue
-                print("remaining:", remaining)
                 final_draft_len = min(self.args.draft_len, remaining)
-                print("final_draft_len:", final_draft_len)
                 draft_ids_trunc = draft_ids[:final_draft_len]
                 draft_t = torch.tensor([draft_ids_trunc],
                                     device=slot["input_ids"].device)
@@ -466,6 +444,9 @@ class ParallelSPGenerator(nn.Module):
                 past_key_values=past_key_values,
                 fractal_key_values_list=fractal_key_values_list,
             )
+            self.performance_dict["model_forward_count"]["draft"] += 1
+            
+            
             
             if self.args.use_cache:
                 past_key_values = _draft_out.past_key_values
@@ -508,6 +489,7 @@ class ParallelSPGenerator(nn.Module):
                 max_length=self.max_length,
                 past_key_values=past_key_values
             )
+            self.performance_dict["model_forward_count"]["verify"] += 1
             
             if self.args.use_cache:
                 past_key_values = _verify_out.past_key_values
@@ -521,9 +503,7 @@ class ParallelSPGenerator(nn.Module):
 
             if all(not s["active"] for s in self.slots):
                 done = True
+                
 
         print("[ParallelSPGenerator] Done all.")
-        input()
         return self.performance_dict
-        
-        
