@@ -3,6 +3,7 @@ import time
 from collections import deque
 
 import torch
+import random
 import wandb
 from tqdm import tqdm
 from transformers import AutoTokenizer, LlamaForCausalLM
@@ -55,22 +56,23 @@ def main():
     
     if args.sweep:
         wandb.define_metric("elapsed", summary="mean")
-    
+
         cfg_dict = dict(vars(args))
-        cfg_dict.update(wandb.config)          # sweep 값으로 덮어쓰기
+        cfg_dict.update(wandb.config)      # sweep 값으로 덮어쓰기
 
-        # (A) 0/1 플래그 → 레이어 인덱스 리스트
-        layer_flags = [cfg_dict.get(f"layer_{i}", 0) for i in range(16)]
-        layer_idxs  = [i for i, f in enumerate(layer_flags) if int(f) == 1]
+        # (A) 0/1 플래그 → 선택된 레이어 인덱스 목록 만들기
+        layer_flags = [cfg_dict.get(f"layer_{i}", 0)
+                       for i in range(args.draft_len * 4)]  # 예: draft_len=4면 16플래그
+        layer_idxs = [i for i, flag in enumerate(layer_flags) if int(flag) == 1]
 
-        # (B) 8개 초과면 무작위로 8개만 유지
-        max_select = 7
+        # (B) 선택 수가 draft_len 보다 많으면 랜덤으로 잘라내기 ★수정
+        max_select = args.draft_len
         if len(layer_idxs) > max_select:
             layer_idxs = random.sample(layer_idxs, max_select)
 
         # (C) args.draft_layer_indexes 갱신
         cfg_dict["draft_layer_indexes"] = layer_idxs
-        setattr(args, "draft_layer_indexes", layer_idxs)   # ← ❶ 추가
+        setattr(args, "draft_layer_indexes", layer_idxs)
 
         print(f"[Sweep] draft_layer_indexes → {args.draft_layer_indexes}")
         wandb.config.update(cfg_dict, allow_val_change=True)
@@ -79,7 +81,7 @@ def main():
     # 데이터 및 토크나이저 준비
     data_iter, max_length = load_dataset(args)
     data_list = list(data_iter)
-    data_list = data_list[36:]
+    data_list = data_list[55:]
     tokenizer, draft_tokens = prepare_tokenizer(args)
 
     # 모델 로드
@@ -129,19 +131,26 @@ def main():
             enc = tokenizer(question, return_tensors="pt").to(model.device)
             generated = enc["input_ids"].clone()
             prompt_len = generated.size(1)
+            eos_id = tokenizer.eos_token_id
+            if eos_id is None:
+                raise ValueError("토크나이저에 EOS 토큰이 지정되어 있지 않습니다.")
 
             t0 = time.time()
             with torch.no_grad():
                 for _ in range(max_length):
                     logits = model(generated, use_cache=args.use_cache).logits[:, -1, :]
                     next_id = torch.argmax(logits, dim=-1, keepdim=True)
+                    ### EOS
+                    if next_id.item() == tokenizer.eos_token_id:
+                        break
                     generated = torch.cat([generated, next_id], dim=-1)
+
             elapsed = time.time() - t0
 
             flops = flops_counter.get_total_flops()
             new_tokens = generated.size(1) - prompt_len
             
-            print(f"generated: {tokenizer.decode(generated[0], skip_special_tokens=True)}")
+            print(f"generated: {tokenizer.decode(generated[0], skip_special_tokens=False)}")
 
             perf_base["times"].append(elapsed)
             perf_base["flops"].append(flops)
@@ -287,6 +296,7 @@ def main():
                 **performance_dict,
             }
             wandb.log(log_data)
+            
             
     elif args.decode_method == "fractal": 
         model.eval()

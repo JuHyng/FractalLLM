@@ -152,7 +152,7 @@ def draft_forward(
         
         slots[batch_idx]["input_ids"] = slots[batch_idx]["input_ids"] [:, :prefix_len]
         
-        for i in range(prefix_len, prefix_len + (slots[batch_idx]["final_draft_len"]*2)+1):
+        for i in range(prefix_len, prefix_len + (slots[batch_idx]["final_draft_len"]*2)):
             token_logits = logits[batch_idx, i-1, :]
             token_prob = token_logits
             token_pred = torch.argmax(token_prob).item()
@@ -242,12 +242,13 @@ def verify_forward(
         first_fail_label = None
         early_stop = False
         
-        total_draft_tokens = slot_data["final_draft_len"] * 2
+        total_draft_tokens = slot_data["final_draft_len"] * 2 
         seq_len_current    = slot_data["current_input_ids"].shape[1]
 
         for step in range(total_draft_tokens):
             pos = seq_len_current - total_draft_tokens - 1 + step
             if pos - 1 < 0 or pos - 1 >= logits.shape[1]:
+                input()
                 break
             token_logits   = logits[i, pos - 1, :]
             verify_pred_id = torch.argmax(token_logits).item()

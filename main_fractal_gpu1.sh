@@ -8,7 +8,7 @@ python main.py \
     --draft_token "[DRAFT{i}]" \
     --decode_method draft \
     --decomp_method quant_8bit \
-    --draft_len 8 \
+    --draft_len 1 \
     --draft_layer_indexes 6 10 11 15\
     --split test \
     --output_dir ./ \
@@ -17,6 +17,6 @@ python main.py \
     --num_beams 1 \
     --n_fewshot 0 \
     --use_cache False \
-    --print_draft False \
+    --print_draft True \
     --device_map "cuda:1" 
 done

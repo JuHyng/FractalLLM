@@ -1,4 +1,5 @@
 import logging
+import random
 import time
 from collections import deque
 
@@ -9,8 +10,8 @@ from transformers import AutoTokenizer, LlamaForCausalLM
 
 from src.args import get_args
 from src.dataset import load_dataset
-from src.model_old import load_model_with_fractal, set_verify_mode, load_quantized_model
-from src.generate_old import ParallelSPGenerator
+from src.model import load_model_with_fractal, set_verify_mode, load_quantized_model
+from src.generate import ParallelSPGenerator
 from src.utils import FlopsCounter
 
 
@@ -97,7 +98,7 @@ def main():
             args.model_name,
             cache_dir=args.cache_dir,
             device_map=args.device_map,
-        )+
+        )
         draft_mode_func = None
     elif args.decode_method == 'draft':
         target_model = LlamaForCausalLM.from_pretrained(

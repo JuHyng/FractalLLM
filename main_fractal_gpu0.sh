@@ -1,7 +1,7 @@
 wandb login 20f894088a42a42e5eef02b48b1e6cce6805fdfe
 wandb online
 
-for dataset in xsum cnn_dm human_eval
+for dataset in gsm8k xsum cnn_dm human_eval
 do
 python main.py \
     --model_name meta-llama/Llama-3.2-1B \
