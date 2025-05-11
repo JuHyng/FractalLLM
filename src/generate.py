@@ -152,8 +152,9 @@ def draft_forward(
         
         slots[batch_idx]["input_ids"] = slots[batch_idx]["input_ids"] [:, :prefix_len]
         
-        for i in range(prefix_len, prefix_len + (slots[batch_idx]["final_draft_len"]*2)):
+        for i in range(prefix_len, prefix_len + (slots[batch_idx]["final_draft_len"]*2)+1):
             token_logits = logits[batch_idx, i-1, :]
+            
             token_prob = token_logits
             token_pred = torch.argmax(token_prob).item()
             
@@ -162,7 +163,7 @@ def draft_forward(
             #     slots[batch_idx]["continue_draft"] = False
             #     break
             
-            slots[batch_idx]["input_ids"] = torch.cat([slots[batch_idx]["input_ids"], torch.tensor([[token_pred]], device=slots[batch_idx]["input_ids"].device)], dim=-1)    
+            slots[batch_idx]["input_ids"] = torch.cat([slots[batch_idx]["input_ids"], torch.tensor([[token_pred]], device=slots[batch_idx]["input_ids"].device)], dim=-1)  
             
     draft_time = time.time() - start_t
     performance_dict["draft_time"] += draft_time        
@@ -242,11 +243,11 @@ def verify_forward(
         first_fail_label = None
         early_stop = False
         
-        total_draft_tokens = slot_data["final_draft_len"] * 2 
+        total_draft_tokens = slot_data["final_draft_len"] * 2 + 1
         seq_len_current    = slot_data["current_input_ids"].shape[1]
 
         for step in range(total_draft_tokens):
-            pos = seq_len_current - total_draft_tokens - 1 + step
+            pos = seq_len_current - total_draft_tokens + step # 현재 위치가 seq_len +1 해야 이전 기반으로 맞출수있기떄문에
             if pos - 1 < 0 or pos - 1 >= logits.shape[1]:
                 input()
                 break
@@ -272,17 +273,15 @@ def verify_forward(
                 continue                                     # 다음 토큰 검사
 
             # ───────── MISMATCH ──────
-            #print(f"[Verify] MISMATCH: slot {i} pos {pos}")
             fail_draft       = True
             first_fail_label = verify_pred_id
             break                      # loop 탈출
         # ------- loop end -------
-
         if early_stop :
             break
         
         if fail_draft and first_fail_label is not None:
-            pre_ids      = slot_data["input_ids"][:, :-(total_draft_tokens + 1 - verified_count)]
+            pre_ids      = slot_data["input_ids"][:, :-(total_draft_tokens - verified_count)]
             if first_fail_label == eos_token_id:
                 slot_data["input_ids"] = pre_ids           # EOS 이전까지만 보존
                 slot_data["continue_draft"] = False        # 더 이상 draft 안 함
@@ -299,8 +298,16 @@ def verify_forward(
             slot_data["input_ids"].size(1) - slot_data["prompt_len"]
         )
 
-        if slot_data["total_new_tokens"] >= max_length:
-            slot_data["continue_draft"] = False
+        if slot_data["total_new_tokens"] > max_length:
+            # 초과분 잘라내기
+            trim     = slot_data["total_new_tokens"] - max_length   # 자를 개수
+            new_end  = slot_data["input_ids"].size(1) - trim        # 남길 길이
+
+            slot_data["input_ids"]         = slot_data["input_ids"][:, :new_end]
+            slot_data["current_input_ids"] = slot_data["current_input_ids"][:, :new_end]
+
+            slot_data["total_new_tokens"]  = max_length
+            slot_data["continue_draft"]    = False
 
         
     verify_time = time.time() - start_t
@@ -510,6 +517,6 @@ class ParallelSPGenerator(nn.Module):
             if all(not s["active"] for s in self.slots):
                 done = True
                 
-
+        input()
         print("[ParallelSPGenerator] Done all.")
         return self.performance_dict

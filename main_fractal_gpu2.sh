@@ -8,8 +8,8 @@ python main.py \
     --draft_token "[DRAFT{i}]" \
     --decode_method fractal \
     --decomp_method quant_8bit \
-    --draft_len 2 \
-    --draft_layer_indexes 2 5\
+    --draft_len 1 \
+    --draft_layer_indexes 10\
     --split test \
     --output_dir ./ \
     --dataset $dataset \
@@ -17,7 +17,7 @@ python main.py \
     --num_beams 1 \
     --n_fewshot 0 \
     --use_cache False \
-    --print_draft False \
+    --print_draft True \
     --device_map "cuda:2" 
 done
 

@@ -1,9 +1,9 @@
 wandb online
 
-for dataset in human_eval
+for dataset in gsm8k xsum cnn_dm
 do
 python main.py \
-    --model_name meta-llama/Llama-3.2-1B \
+    --model_name meta-llama/Llama-3.1-8B-Instruct \
     --decode_method draft \
     --decomp_method quant_8bit \
     --draft_len 8 \
@@ -13,6 +13,5 @@ python main.py \
     --max_samples 100 \
     --num_beams 1 \
     --n_fewshot 0 \
-    --device_map "cuda:0" \
     --use_cache False
 done
