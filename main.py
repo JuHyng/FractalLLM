@@ -81,7 +81,6 @@ def main():
     # 데이터 및 토크나이저 준비
     data_iter, max_length = load_dataset(args)
     data_list = list(data_iter)
-    data_list = data_list[55:]
     tokenizer, draft_tokens = prepare_tokenizer(args)
 
     # 모델 로드
@@ -196,9 +195,11 @@ def main():
             generated = enc["input_ids"].clone()
             prompt_len = generated.size(1)
             t0 = time.time()
+            
+            done=False
             with torch.no_grad():
                 total_generated_tokens = 0
-                while total_generated_tokens < max_length:
+                while not done:
                     draft_seq = generated.clone()
                     
                     # draft
@@ -208,6 +209,8 @@ def main():
                             break
                         draft_logits = draft_model(draft_seq, use_cache=args.use_cache).logits[:, -1, :]
                         next_id = torch.argmax(draft_logits, dim=-1, keepdim=True)
+                        if next_id.item() == tokenizer.eos_token_id:
+                            break
                         draft_seq = torch.cat([draft_seq, next_id], dim=-1)
                         performance_dict["model_forward_count"]["draft"] += 1
                         
@@ -245,6 +248,10 @@ def main():
                                 ### DEBUG (Optional)
                                 print(f"[MISMATCH]: draft: {draft_token_at_i.item()}, verify: {target_pred_at_i.item()}")
                                 break # Stop at the first mismatch
+                            
+                            if target_pred_at_i == tokenizer.eos_token_id:
+                                done = True
+                                break
 
                         # Append accepted tokens (if any)
                         if accepted_len > 0:
@@ -265,10 +272,10 @@ def main():
 
                     # Check if generation finished after this draft/verify cycle
                     if total_generated_tokens >= max_length:
-                        break
+                        done = True
 
                     ### REMOVE DEBUG input()
-                    text_out = tokenizer.decode(generated[0], skip_special_tokens=True)
+                    text_out = tokenizer.decode(generated[0], skip_special_tokens=False)
                     # print(f"[{idx}] Intermediate Generated >>> {text_out}")
                     
             accept_ratio = accept_count / total_checks if total_checks > 0 else 0.0
@@ -309,15 +316,14 @@ def main():
                 "new_tokens": 0,
                 "draft_time": 0.0,
                 "verify_time": 0.0,
-                "accept_ratio": 0.0,
-                "total_accept_count":   0,
-                "total_checked_count":  0,
-
-                # ─── 드래프트별 기록 ───
-                "draft_accept_counts":  [],   
-                "draft_checked_counts": [],   
-                "draft_accept_ratios":  [],    # (optional) 비율
+                # ==================== NEW ====================
+                "total_accept_count": 0,    # 누적 맞은 토큰 수
+                "total_checked_count": 0,   # 누적 검증한 토큰 수
+                "accept_ratio": 0.0,        # 실시간 비율
+                # ============================================
             }
+
+
             
             gen = ParallelSPGenerator(
                 model=model,

@@ -77,6 +77,7 @@ class FractalLlamaModel(LlamaPreTrainedModel):
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
+        self.is_verify =False
         
 
         # Initialize weights and apply final processing
@@ -87,6 +88,9 @@ class FractalLlamaModel(LlamaPreTrainedModel):
 
     def set_input_embeddings(self, value):
         self.embed_tokens = value
+        
+    def set_quantized_layers(self, quantized_layers):
+        self.quantized_layers = quantized_layers
 
     def forward(
         self,
@@ -932,6 +936,7 @@ def load_model_with_fractal(
     )
     
     decomposed_layers = quant_model.model.layers
+    base_model.model.set_quantized_layers(decomposed_layers)
             
     print(f"[INFO] Total numbers including decomposed layers: {len(decomposed_layers)}")
     

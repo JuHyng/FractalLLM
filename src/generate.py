@@ -153,17 +153,16 @@ def draft_forward(
         slots[batch_idx]["input_ids"] = slots[batch_idx]["input_ids"] [:, :prefix_len]
         
         for i in range(prefix_len, prefix_len + (slots[batch_idx]["final_draft_len"]*2)+1):
-            token_logits = logits[batch_idx, i-1, :]
             
+            token_logits = logits[batch_idx, i-1, :]
             token_prob = token_logits
             token_pred = torch.argmax(token_prob).item()
             
-            # if token_pred == eos_token_id:
-            #     print(f"[Draft] EOS token encountered. Stopping draft for slot {batch_idx}.")
-            #     slots[batch_idx]["continue_draft"] = False
-            #     break
+            slots[batch_idx]["input_ids"] = torch.cat([slots[batch_idx]["input_ids"], torch.tensor([[token_pred]], device=slots[batch_idx]["input_ids"].device)], dim=-1) 
             
-            slots[batch_idx]["input_ids"] = torch.cat([slots[batch_idx]["input_ids"], torch.tensor([[token_pred]], device=slots[batch_idx]["input_ids"].device)], dim=-1)  
+            if token_pred == eos_token_id:
+                slots[batch_idx]["final_draft_len"] = i - prefix_len
+                break 
             
     draft_time = time.time() - start_t
     performance_dict["draft_time"] += draft_time        
@@ -249,7 +248,6 @@ def verify_forward(
         for step in range(total_draft_tokens):
             pos = seq_len_current - total_draft_tokens + step # 현재 위치가 seq_len +1 해야 이전 기반으로 맞출수있기떄문에
             if pos - 1 < 0 or pos - 1 >= logits.shape[1]:
-                input()
                 break
             token_logits   = logits[i, pos - 1, :]
             verify_pred_id = torch.argmax(token_logits).item()
@@ -257,6 +255,7 @@ def verify_forward(
 
             # ───────── MATCH ─────────
             if verify_pred_id == curr_id:
+                print(f"Draft {i} - Step {step}: Match! Pred: {verify_pred_id}, Curr: {curr_id}")
                 if verify_pred_id == eos_token_id:           # EOS를 맞힌 경우
                     verified_count += 1 #EOS도 맞췄췄으니깐 +1
                     
@@ -269,6 +268,7 @@ def verify_forward(
                     early_stop = True
                     # ⑤ **즉시** 외부 루프 종료
                     break
+                
                 verified_count += 1
                 continue                                     # 다음 토큰 검사
 
@@ -298,7 +298,7 @@ def verify_forward(
             slot_data["input_ids"].size(1) - slot_data["prompt_len"]
         )
 
-        if slot_data["total_new_tokens"] > max_length:
+        if slot_data["total_new_tokens"] >= max_length:
             # 초과분 잘라내기
             trim     = slot_data["total_new_tokens"] - max_length   # 자를 개수
             new_end  = slot_data["input_ids"].size(1) - trim        # 남길 길이
@@ -308,15 +308,15 @@ def verify_forward(
 
             slot_data["total_new_tokens"]  = max_length
             slot_data["continue_draft"]    = False
+                # ==================== NEW ====================
+        performance_dict["total_accept_count"]  += verified_count
+        performance_dict["total_checked_count"] += total_draft_tokens
+        # ============================================
 
-        
+            
     verify_time = time.time() - start_t
     performance_dict["verify_time"] += verify_time
     performance_dict["new_tokens"] = slots[0]["total_new_tokens"]
-    
-        # 평균 accept_ratio 계산
-    ratios = [log["accept_ratio"] for log in draft_performance_logs]
-    performance_dict["avg_accept_ratio"] = sum(ratios) / len(ratios) if ratios else 0.0
 
     # # 각 드래프트의 성능 로그를 wandb에 로깅
     # for log in draft_performance_logs:
@@ -503,6 +503,17 @@ class ParallelSPGenerator(nn.Module):
                 past_key_values=past_key_values
             )
             self.performance_dict["model_forward_count"]["verify"] += 1
+            accepted = self.performance_dict["total_accept_count"]
+            checked  = self.performance_dict["total_checked_count"]
+            if checked > 0:
+                self.performance_dict["accept_ratio"] = accepted / checked
+
+            wandb.log({
+                "accept_ratio_step": self.performance_dict["accept_ratio"],   # ★ step 단위 그래프용
+                "draft_fw":  self.performance_dict["model_forward_count"]["draft"],
+                "verify_fw": self.performance_dict["model_forward_count"]["verify"],
+                # … 이미 있던 다른 로그 필드 …
+            })
             
             if self.args.use_cache:
                 past_key_values = _verify_out.past_key_values
@@ -515,8 +526,6 @@ class ParallelSPGenerator(nn.Module):
                     self._fill_slot(s)
 
             if all(not s["active"] for s in self.slots):
-                done = True
-                
-        input()
+                done = True     
         print("[ParallelSPGenerator] Done all.")
         return self.performance_dict
