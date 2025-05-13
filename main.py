@@ -3,6 +3,7 @@ import time
 from collections import deque
 
 import torch
+import random
 import wandb
 from tqdm import tqdm
 from transformers import AutoTokenizer, LlamaForCausalLM
@@ -51,7 +52,31 @@ def main():
     else:
         exp_name = f"{ts}-{args.model_name}-{args.decode_method}-{args.dataset}-max_samples:{args.max_samples}"
 
-    wandb.init(project="FractalLLM", name=exp_name, config=args.__dict__)
+    wandb.init(project="FractalLLM", entity='kimjuhyng', name=exp_name, config=args.__dict__)
+    
+    if args.sweep:
+        wandb.define_metric("elapsed", summary="mean")
+
+        cfg_dict = dict(vars(args))
+        cfg_dict.update(wandb.config)      # sweep 값으로 덮어쓰기
+
+        # (A) 0/1 플래그 → 선택된 레이어 인덱스 목록 만들기
+        layer_flags = [cfg_dict.get(f"layer_{i}", 0)
+                       for i in range(args.draft_len * 4)]  # 예: draft_len=4면 16플래그
+        layer_idxs = [i for i, flag in enumerate(layer_flags) if int(flag) == 1]
+
+        # (B) 선택 수가 draft_len 보다 많으면 랜덤으로 잘라내기 ★수정
+        max_select = args.draft_len
+        if len(layer_idxs) > max_select:
+            layer_idxs = random.sample(layer_idxs, max_select)
+
+        # (C) args.draft_layer_indexes 갱신
+        cfg_dict["draft_layer_indexes"] = layer_idxs
+        setattr(args, "draft_layer_indexes", layer_idxs)
+
+        print(f"[Sweep] draft_layer_indexes → {args.draft_layer_indexes}")
+        wandb.config.update(cfg_dict, allow_val_change=True)
+        setattr(args, "draft_layer_indexes", layer_idxs)
 
     # 데이터 및 토크나이저 준비
     data_iter, max_length = load_dataset(args)
@@ -105,19 +130,24 @@ def main():
             enc = tokenizer(question, return_tensors="pt").to(model.device)
             generated = enc["input_ids"].clone()
             prompt_len = generated.size(1)
+            eos_id = tokenizer.eos_token_id
+            if eos_id is None:
+                raise ValueError("토크나이저에 EOS 토큰이 지정되어 있지 않습니다.")
 
             t0 = time.time()
             with torch.no_grad():
                 for _ in range(max_length):
                     logits = model(generated, use_cache=args.use_cache).logits[:, -1, :]
                     next_id = torch.argmax(logits, dim=-1, keepdim=True)
+                    ### EOS
+                    if next_id.item() == tokenizer.eos_token_id:
+                        break
                     generated = torch.cat([generated, next_id], dim=-1)
+
             elapsed = time.time() - t0
 
             flops = flops_counter.get_total_flops()
             new_tokens = generated.size(1) - prompt_len
-            
-            print(f"generated: {tokenizer.decode(generated[0], skip_special_tokens=True)}")
 
             perf_base["times"].append(elapsed)
             perf_base["flops"].append(flops)
@@ -163,9 +193,11 @@ def main():
             generated = enc["input_ids"].clone()
             prompt_len = generated.size(1)
             t0 = time.time()
+            
+            done=False
             with torch.no_grad():
                 total_generated_tokens = 0
-                while total_generated_tokens < max_length:
+                while not done:
                     draft_seq = generated.clone()
                     
                     # draft
@@ -175,6 +207,8 @@ def main():
                             break
                         draft_logits = draft_model(draft_seq, use_cache=args.use_cache).logits[:, -1, :]
                         next_id = torch.argmax(draft_logits, dim=-1, keepdim=True)
+                        if next_id.item() == tokenizer.eos_token_id:
+                            break
                         draft_seq = torch.cat([draft_seq, next_id], dim=-1)
                         performance_dict["model_forward_count"]["draft"] += 1
                         
@@ -212,6 +246,10 @@ def main():
                                 ### DEBUG (Optional)
                                 print(f"[MISMATCH]: draft: {draft_token_at_i.item()}, verify: {target_pred_at_i.item()}")
                                 break # Stop at the first mismatch
+                            
+                            if target_pred_at_i == tokenizer.eos_token_id:
+                                done = True
+                                break
 
                         # Append accepted tokens (if any)
                         if accepted_len > 0:
@@ -232,10 +270,10 @@ def main():
 
                     # Check if generation finished after this draft/verify cycle
                     if total_generated_tokens >= max_length:
-                        break
+                        done = True
 
                     ### REMOVE DEBUG input()
-                    text_out = tokenizer.decode(generated[0], skip_special_tokens=True)
+                    text_out = tokenizer.decode(generated[0], skip_special_tokens=False)
                     # print(f"[{idx}] Intermediate Generated >>> {text_out}")
                     
             accept_ratio = accept_count / total_checks if total_checks > 0 else 0.0
@@ -264,6 +302,7 @@ def main():
             }
             wandb.log(log_data)
             
+            
     elif args.decode_method == "fractal": 
         model.eval()
         flops_counter = FlopsCounter(model)
@@ -275,7 +314,11 @@ def main():
                 "new_tokens": 0,
                 "draft_time": 0.0,
                 "verify_time": 0.0,
-                "accept_ratio": 0.0,
+                # ==================== NEW ====================
+                "total_accept_count": 0,    # 누적 맞은 토큰 수
+                "total_checked_count": 0,   # 누적 검증한 토큰 수
+                "accept_ratio": 0.0,        # 실시간 비율
+                # ============================================
             }
             
             gen = ParallelSPGenerator(
