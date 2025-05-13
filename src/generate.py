@@ -255,7 +255,7 @@ def verify_forward(
 
             # ───────── MATCH ─────────
             if verify_pred_id == curr_id:
-                print(f"Draft {i} - Step {step}: Match! Pred: {verify_pred_id}, Curr: {curr_id}")
+                #print(f"Draft {i} - Step {step}: Match! Pred: {verify_pred_id}, Curr: {curr_id}")
                 if verify_pred_id == eos_token_id:           # EOS를 맞힌 경우
                     verified_count += 1 #EOS도 맞췄췄으니깐 +1
                     
@@ -429,8 +429,6 @@ class ParallelSPGenerator(nn.Module):
                 
                 slot["final_draft_len"] = final_draft_len
 
-                
-            
             cache_batch_split = None
             if self.args.use_cache:
                 if past_key_values.get_seq_length() > 0:
@@ -521,11 +519,9 @@ class ParallelSPGenerator(nn.Module):
 
             for s in active_slots:
                 if not s["continue_draft"]:
-                    print(">> Generated text:", self.tokenizer.decode(s["input_ids"][0]))
                     s["active"] = False
                     self._fill_slot(s)
 
             if all(not s["active"] for s in self.slots):
                 done = True     
-        print("[ParallelSPGenerator] Done all.")
         return self.performance_dict

@@ -582,6 +582,7 @@ class FractalModule(torch.nn.Module):
                 # token_prob = torch.softmax(token_logits, dim=-1)
                 token_prob = token_logits
                 token_pred = torch.argmax(token_prob).item()
+                
                 if i >= input_ids.shape[1]:
                     token_tensor = torch.full(
                     (input_ids.shape[0], 1),

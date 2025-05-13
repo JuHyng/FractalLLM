@@ -52,7 +52,7 @@ def main():
     else:
         exp_name = f"{ts}-{args.model_name}-{args.decode_method}-{args.dataset}-max_samples:{args.max_samples}"
 
-    wandb.init(project="FractalFinal", name=exp_name, config=args.__dict__)
+    wandb.init(project="FractalLLM", entity='kimjuhyng', name=exp_name, config=args.__dict__)
     
     if args.sweep:
         wandb.define_metric("elapsed", summary="mean")
@@ -148,8 +148,6 @@ def main():
 
             flops = flops_counter.get_total_flops()
             new_tokens = generated.size(1) - prompt_len
-            
-            print(f"generated: {tokenizer.decode(generated[0], skip_special_tokens=False)}")
 
             perf_base["times"].append(elapsed)
             perf_base["flops"].append(flops)
@@ -322,8 +320,6 @@ def main():
                 "accept_ratio": 0.0,        # 실시간 비율
                 # ============================================
             }
-
-
             
             gen = ParallelSPGenerator(
                 model=model,
