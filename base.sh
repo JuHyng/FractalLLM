@@ -1,5 +1,5 @@
 wandb login 20f894088a42a42e5eef02b48b1e6cce6805fdfe
-wandb offline
+wandb online
 
 for dataset in human_eval
 do
