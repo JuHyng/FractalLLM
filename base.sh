@@ -24,12 +24,12 @@ done
 for dataset in human_eval
 do
 python main.py \
-    --model_name codellama/CodeLlama-13b-Instruct-hf \
+    --model_name meta-llama/Llama-3.1-8B-Instruct \
     --draft_token "[DRAFT{i}]" \
     --decode_method fractal \
     --decomp_method quant_8bit \
-    --draft_len 4 \
-    --draft_layer_indexes 6 10 11 15\
+    --draft_len 8 \
+    --draft_layer_indexes 3 7 11 15 19 23 27 31\
     --split test \
     --output_dir ./ \
     --dataset $dataset \
@@ -40,3 +40,4 @@ python main.py \
     --print_draft False \
     --device_map "auto" 
 done
+
